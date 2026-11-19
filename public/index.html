@@ -14,12 +14,21 @@
 
   <header class="topbar">
     <div class="brand">Rope</div>
+    <nav id="menu" class="menu" aria-label="Menu" hidden>
+      <button class="menu-btn" data-tab="people" aria-pressed="false">People<span id="req-badge" class="badge" hidden></span></button>
+      <button class="menu-btn" data-tab="route" aria-pressed="false">Route</button>
+      <button class="menu-btn" data-tab="me" aria-pressed="false">Me</button>
+    </nav>
     <div id="status" class="status" role="status">Starting…</div>
   </header>
 
   <div id="gps-banner" class="banner" role="alert" hidden>
     <span id="gps-msg"></span>
     <button id="gps-retry" class="primary">Enable location</button>
+  </div>
+
+  <div id="map-banner" class="banner map-banner" role="alert" hidden>
+    <span id="map-msg"></span>
   </div>
 
   <!-- First run -->
@@ -34,11 +43,10 @@
   </section>
 
   <main id="panel" class="panel" hidden>
-    <nav class="tabs" role="tablist">
-      <button role="tab" data-tab="people" aria-selected="true" class="tab active">People</button>
-      <button role="tab" data-tab="route" aria-selected="false" class="tab">Route</button>
-      <button role="tab" data-tab="me" aria-selected="false" class="tab">Me</button>
-    </nav>
+    <div class="panel-head">
+      <strong id="panel-title">People</strong>
+      <button id="close-panel" class="ghost" aria-label="Close panel">✕</button>
+    </div>
 
     <!-- People -->
     <section id="tab-people" class="tabpanel">
@@ -107,6 +115,11 @@
           <input id="relay" spellcheck="false" aria-label="Rendezvous server URL">
           <button id="save-relay" class="ghost">Save</button>
         </div>
+      </div>
+
+      <div class="block">
+        <div class="label">About this build</div>
+        <p class="muted small">Build <code id="build">__BUILD__</code></p>
       </div>
 
       <div class="block">

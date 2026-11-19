@@ -70,10 +70,16 @@ function initMap() {
   });
   map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
 
-  let tileErrors = 0;
+  // Put the first map error on screen with the build id, so a blank map can be diagnosed from a phone.
+  let mapErrorShown = false;
   map.on('error', (e) => {
-    if (e.sourceId === 'osm' && ++tileErrors === 3) setStatus('Map tiles are not loading. Check your connection.');
+    if (mapErrorShown) return;
+    mapErrorShown = true;
+    const detail = String(e?.error?.message || e?.error || 'unknown error').slice(0, 120);
+    $('#map-msg').textContent = `Map problem: ${detail} (build ${$('#build').textContent})`;
+    $('#map-banner').hidden = false;
   });
+  map.on('idle', () => { if (!mapErrorShown) $('#map-banner').hidden = true; });
   map.on('load', () => {
     map.addSource('route', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
     map.addLayer({
@@ -319,6 +325,9 @@ function renderRequests() {
   const reqs = Object.values(state.contacts).filter((c) => c.status === 'request');
   const ul = $('#requests');
   ul.hidden = !reqs.length;
+  const badge = $('#req-badge'); // so a request is noticed even while the map is showing
+  badge.hidden = !reqs.length;
+  badge.textContent = String(reqs.length);
   ul.innerHTML = reqs.map((c) => `
     <li class="contact request">
       <div class="who"><div class="name">${esc(c.name)} wants to connect</div>
@@ -395,6 +404,7 @@ async function onListClick(e) {
       case 'decline': delete state.contacts[c.id]; break;
       case 'focus':
         map.flyTo({ center: [c.pos.lon, c.pos.lat], zoom: Math.max(map.getZoom(), 14) });
+        closePanel(); // show the map
         return;
       case 'nick': {
         const nick = prompt(`Nickname for ${c.name} (empty to clear)`, c.nick ?? '');
@@ -502,20 +512,32 @@ async function renderProfile(coords, totalM) {
 
 // ---------- tabs, onboarding, startup ----------
 
-function selectTab(name) {
-  document.querySelectorAll('.tab').forEach((t) => {
-    const on = t.dataset.tab === name;
-    t.classList.toggle('active', on);
-    t.setAttribute('aria-selected', String(on));
-  });
-  for (const t of ['people', 'route', 'me']) $(`#tab-${t}`).hidden = t !== name;
+// The app opens on the map. The top menu opens one panel at a time over it; the same
+// button (or the close button, or Escape) puts the map back on its own.
+const PANEL_TITLES = { people: 'People', route: 'Route', me: 'Me' };
+let openTab = null;
+
+function openPanel(name) {
+  openTab = name;
+  $('#panel').hidden = false;
+  $('#panel-title').textContent = PANEL_TITLES[name];
+  for (const t of Object.keys(PANEL_TITLES)) $(`#tab-${t}`).hidden = t !== name;
+  document.querySelectorAll('.menu-btn').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.tab === name)));
 }
+
+function closePanel() {
+  openTab = null;
+  $('#panel').hidden = true;
+  document.querySelectorAll('.menu-btn').forEach((b) => b.setAttribute('aria-pressed', 'false'));
+}
+
+const togglePanel = (name) => (openTab === name ? closePanel() : openPanel(name));
 
 const inviteLink = () => `${location.origin}${location.pathname}#c=${encodeCard(cardOf(state.identity))}`;
 
 async function startApp() {
   $('#auth').hidden = true;
-  $('#panel').hidden = false;
+  $('#menu').hidden = false; // the map stays in view; panels open from the top menu
   startGps(); // first, so a failure further down can't leave location unasked
   keys = await loadKeys(state.identity);
   relay = new Relay(state.relay || DEFAULT_RELAY);
@@ -543,7 +565,7 @@ function consumeInviteFromUrl() {
     $('#add-error').hidden = false;
     $('#add-error').classList.remove('error');
     $('#add-error').textContent = `Invite from ${card.n}. Press Add to connect.`;
-    selectTab('people');
+    openPanel('people');
   } catch { /* ignore a broken link */ }
 }
 
@@ -581,7 +603,9 @@ function wire() {
 
   $('#contacts').addEventListener('click', onListClick);
   $('#requests').addEventListener('click', onListClick);
-  document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => selectTab(t.dataset.tab)));
+  document.querySelectorAll('.menu-btn').forEach((b) => b.addEventListener('click', () => togglePanel(b.dataset.tab)));
+  $('#close-panel').addEventListener('click', closePanel);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePanel(); });
 
   $('#visible').addEventListener('change', (e) => {
     state.visible = e.target.checked;
@@ -637,6 +661,8 @@ function wire() {
 }
 
 function bootstrap() {
+  const build = $('#build');
+  if (build.textContent.startsWith('__')) build.textContent = 'dev'; // not replaced by the Pages build
   populateProfiles();
   initMap();
   wire();

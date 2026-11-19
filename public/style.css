@@ -49,8 +49,8 @@ body {
 #map { position: fixed; inset: 0; }
 
 .topbar {
-  position: fixed; top: 0; left: 0; right: 0;
-  display: flex; align-items: center; justify-content: space-between;
+  position: fixed; top: 0; left: 0; right: 0; z-index: 6;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;
   padding: 12px 16px;
   padding-top: max(12px, env(safe-area-inset-top));
   pointer-events: none;
@@ -215,3 +215,34 @@ button.toggle.active { background: var(--accent); color: #fff; border-color: tra
 }
 .banner button { flex: none; }
 @media (min-width: 641px) { .banner { right: auto; max-width: 420px; } }
+
+
+/* Top menu */
+.menu {
+  pointer-events: auto; display: flex; gap: 2px; padding: 3px;
+  background: var(--surface); backdrop-filter: blur(10px);
+  border: 1px solid var(--border); border-radius: 999px; box-shadow: var(--shadow);
+}
+.menu-btn {
+  position: relative; border: 0; border-radius: 999px; padding: 6px 14px;
+  background: transparent; color: var(--text); font-weight: 600; font-size: 14px;
+}
+.menu-btn[aria-pressed="true"] { background: var(--accent); color: #fff; }
+.badge {
+  display: inline-grid; place-items: center; min-width: 16px; height: 16px; margin-left: 6px;
+  padding: 0 4px; border-radius: 999px; background: var(--danger); color: #fff; font-size: 11px;
+}
+.panel-head {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 10px 12px 10px 16px; border-bottom: 1px solid var(--border);
+}
+.panel-head button { padding: 4px 10px; }
+
+/* Banners sit below the top bar (which can wrap to two lines on phones) */
+.banner { top: 104px; }
+.map-banner { top: 152px; }
+@media (min-width: 641px) { .banner { top: 64px; } .map-banner { top: 112px; } }
+@media (max-width: 640px) {
+  .status { order: 3; margin-left: 0; font-size: 12px; }
+  .panel { top: auto; }
+}
