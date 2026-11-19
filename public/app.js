@@ -5,6 +5,9 @@ import {
 } from './crypto.js';
 import { Relay, DEFAULT_RELAY } from './net.js';
 import {
+  initialFollow, followPerson, dragged, arrowPressed, contactRemoved, arrowState,
+} from './follow.js';
+import {
   shouldSendPosition, theyCanSeeMe, seeingThem, canRemoveContact,
   applyPairMessage, adminPayload, isStale,
 } from './social.js';
@@ -91,6 +94,10 @@ function initMap() {
   map.on('click', (e) => {
     if (routeMode) setDestination({ lat: e.lngLat.lat, lon: e.lngLat.lng });
   });
+
+  // Dragging the map by hand stops following. The map's own animated moves don't fire dragstart.
+  map.on('dragstart', () => setFollow(dragged(follow)));
+  map.on('moveend', () => { programmaticMove = false; });
 }
 
 function makeEl(cls, text, color) {
@@ -108,6 +115,71 @@ function colorFor(id) {
 const initials = (n) => n.split(/\s+/).filter(Boolean).slice(0, 2).map((p) => p[0].toUpperCase()).join('') || '?';
 const label = (c) => c.nick || c.name;
 
+// ---------- following ----------
+// The map opens following my own position. "Show" on a person follows them instead.
+// Dragging the map stops following; the arrow button resumes it.
+
+let follow = initialFollow();
+let programmaticMove = false;
+let lastFollowed = null; // the point we last centred on, so repeated identical updates don't re-animate
+
+/** Where the followed thing is right now, or null if we don't have a usable position for it. */
+function followedPoint() {
+  if (follow.target === 'me') return myPos ? { lat: myPos.lat, lon: myPos.lon } : null;
+  const c = state?.contacts[follow.target];
+  if (!c || c.status !== 'active' || !c.pos || isStale(c.pos) || !seeingThem(c)) return null;
+  return { lat: c.pos.lat, lon: c.pos.lon };
+}
+
+// On a phone the open sheet covers the lower part of the map; keep the followed point in the part you can see.
+function sheetPadding() {
+  const panel = $('#panel');
+  const phone = window.matchMedia('(max-width: 640px)').matches;
+  return phone && !panel.hidden && panel.classList.contains('open') ? panel.offsetHeight : 0;
+}
+
+/**
+ * fresh: starting to follow, so zoom in to a useful level.
+ * force: re-centre even if the point hasn't changed (e.g. the sheet opened or closed).
+ */
+function moveToFollowed({ fresh = false, force = false } = {}) {
+  const pt = followedPoint();
+  if (!pt || !map) return;
+  const key = `${follow.target}|${pt.lat},${pt.lon}`;
+  if (!fresh && !force && key === lastFollowed) return;
+  if (!fresh && !force && map.isMoving() && !programmaticMove) return; // don't fight the user's gesture
+  lastFollowed = key;
+  programmaticMove = true;
+  map.easeTo({
+    center: [pt.lon, pt.lat],
+    zoom: fresh ? Math.max(map.getZoom(), 15) : map.getZoom(),
+    padding: { top: 0, left: 0, right: 0, bottom: sheetPadding() },
+    duration: fresh ? 800 : 500,
+  });
+}
+
+function renderFollowUi() {
+  const st = arrowState(follow);
+  const btn = $('#locate');
+  btn.dataset.follow = st; // 'me' = filled arrow, otherwise outlined
+  btn.setAttribute('aria-pressed', String(st !== 'off'));
+  const lab = $('#follow-label');
+  if (st === 'person' && state?.contacts[follow.target]) {
+    const c = state.contacts[follow.target];
+    lab.hidden = false;
+    lab.textContent = followedPoint() ? `Following ${label(c)}` : `Waiting for ${label(c)}…`;
+  } else {
+    lab.hidden = true;
+  }
+}
+
+function setFollow(next, { recentre = false } = {}) {
+  follow = next;
+  lastFollowed = null;
+  renderFollowUi();
+  if (recentre) moveToFollowed({ fresh: true });
+}
+
 function renderMarkers() {
   const seen = new Set();
   for (const c of activeContacts()) {
@@ -123,6 +195,7 @@ function renderMarkers() {
     }
   }
   for (const [id, m] of markers) if (!seen.has(id)) { m.remove(); markers.delete(id); }
+  if (follow.target !== null && follow.target !== 'me') { moveToFollowed(); renderFollowUi(); }
 }
 
 // ---------- GPS and heights ----------
@@ -167,12 +240,14 @@ function onGpsError(err) {
 function onFix(p) {
   $('#gps-banner').hidden = true;
   const { latitude: lat, longitude: lon, accuracy, altitude } = p.coords;
+  const firstFix = myPos === null;
   myPos = { lat, lon, acc: accuracy };
   if (!myMarker) myMarker = new maplibregl.Marker({ element: makeEl('me-dot', '') }).setLngLat([lon, lat]).addTo(map);
   else myMarker.setLngLat([lon, lat]);
   $('#me-gps').textContent = `±${Math.round(accuracy)} m accuracy`;
   $('#gps-alt').textContent = altitude == null ? 'n/a' : `${Math.round(altitude)} m`;
   setStatus('GPS live');
+  if (follow.target === 'me') moveToFollowed({ fresh: firstFix });
   maybeSendPosition();
   maybeUpdateTerrain();
   renderContacts();
@@ -405,8 +480,8 @@ async function onListClick(e) {
       case 'accept': await acceptRequest(c.id); break;
       case 'decline': delete state.contacts[c.id]; break;
       case 'focus':
-        map.flyTo({ center: [c.pos.lon, c.pos.lat], zoom: Math.max(map.getZoom(), 14) });
         closePanel(); // show the map
+        setFollow(followPerson(follow, c.id), { recentre: true }); // and follow this person
         return;
       case 'nick': {
         const nick = prompt(`Nickname for ${c.name} (empty to clear)`, c.nick ?? '');
@@ -427,6 +502,7 @@ async function onListClick(e) {
         if (!confirm(`Remove ${c.name}?`)) return;
         if (channels.has(c.id)) { relay.unsubscribe(channels.get(c.id).topic); channels.delete(c.id); }
         delete state.contacts[c.id];
+        setFollow(contactRemoved(follow, c.id)); // never keep following someone who is gone
         break;
     }
     saveState();
@@ -532,6 +608,8 @@ function openPanel(name) {
   document.querySelectorAll('.menu-btn').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.tab === name)));
   panel.style.transform = '';
   requestAnimationFrame(() => requestAnimationFrame(() => panel.classList.add('open'))); // let it start off-screen, then slide in
+  // Once it has slid in, keep the followed point in the part of the map that is still visible.
+  setTimeout(() => { if (follow.target !== null) moveToFollowed({ force: true }); }, 480);
 }
 
 function closePanel() {
@@ -542,6 +620,7 @@ function closePanel() {
   document.querySelectorAll('.menu-btn').forEach((b) => b.setAttribute('aria-pressed', 'false'));
   clearTimeout(closeTimer);
   closeTimer = setTimeout(() => { if (openTab === null) panel.hidden = true; }, reducedMotion() ? 0 : 450);
+  if (follow.target !== null) moveToFollowed({ force: true }); // sheet is leaving: use the whole map again
 }
 
 // Drag the sheet down to dismiss it (phones), like a system sheet.
@@ -582,6 +661,7 @@ async function startApp() {
   $('#auth').hidden = true;
   $('#menu').hidden = false; // the map stays in view; panels open from the top menu
   $('#locate').hidden = false;
+  renderFollowUi();
   startGps(); // first, so a failure further down can't leave location unasked
   keys = await loadKeys(state.identity);
   relay = new Relay(state.relay || DEFAULT_RELAY);
@@ -650,9 +730,11 @@ function wire() {
   document.querySelectorAll('.menu-btn').forEach((b) => b.addEventListener('click', () => togglePanel(b.dataset.tab)));
   $('#close-panel').addEventListener('click', closePanel);
   enableSheetDrag();
+  // The arrow: after a drag it resumes following; while following a person it returns to me.
   $('#locate').addEventListener('click', () => {
-    if (myPos) map.flyTo({ center: [myPos.lon, myPos.lat], zoom: Math.max(map.getZoom(), 15) });
-    else { startGps(); setStatus('Waiting for your location…'); }
+    const next = arrowPressed(follow);
+    if (next.target === 'me' && !myPos) { startGps(); setStatus('Waiting for your location…'); }
+    setFollow(next, { recentre: true });
   });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePanel(); });
 

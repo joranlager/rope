@@ -27,8 +27,9 @@
     <div id="status" class="status" role="status">Starting…</div>
   </header>
 
-  <button id="locate" class="fab" aria-label="Show my location" hidden>
-    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M21 3 3 10.5l7 2.5 2.5 7z"/></svg>
+  <div id="follow-label" class="follow-label" role="status" hidden></div>
+  <button id="locate" class="fab" aria-label="Follow my location" data-follow="me" aria-pressed="true" hidden>
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M21 3 3 10.5l7 2.5 2.5 7z"/></svg>
   </button>
 
   <div id="gps-banner" class="banner" role="alert" hidden>
