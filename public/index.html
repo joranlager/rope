@@ -4,6 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Rope">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data: blob: https://tile.openstreetmap.org; connect-src https:; worker-src blob:">
   <title>Rope</title>
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
@@ -22,6 +27,10 @@
     <div id="status" class="status" role="status">Starting…</div>
   </header>
 
+  <button id="locate" class="fab" aria-label="Show my location" hidden>
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M21 3 3 10.5l7 2.5 2.5 7z"/></svg>
+  </button>
+
   <div id="gps-banner" class="banner" role="alert" hidden>
     <span id="gps-msg"></span>
     <button id="gps-retry" class="primary">Enable location</button>
@@ -34,28 +43,29 @@
   <!-- First run -->
   <section id="auth" class="card auth" hidden>
     <h1>Welcome to Rope</h1>
-    <p class="muted">Pick a display name. Your keys are created on this device and never leave it. There is no account and no server of ours.</p>
+    <p class="muted">Share where you are with the few people you trust. Your keys are created on this device and never leave it. There is no account and no server of ours.</p>
     <form id="auth-form" class="row">
-      <input id="auth-name" name="name" placeholder="Your name" maxlength="40" required autocomplete="nickname">
-      <button type="submit" class="primary">Create</button>
+      <input id="auth-name" name="name" placeholder="Your name" maxlength="40" required autocomplete="nickname" enterkeyhint="go">
+      <button type="submit" class="primary">Continue</button>
     </form>
     <p id="auth-error" class="error" hidden></p>
   </section>
 
-  <main id="panel" class="panel" hidden>
+  <main id="panel" class="panel" hidden aria-labelledby="panel-title">
+    <div class="grabber" aria-hidden="true"></div>
     <div class="panel-head">
-      <strong id="panel-title">People</strong>
-      <button id="close-panel" class="ghost" aria-label="Close panel">✕</button>
+      <h2 id="panel-title">People</h2>
+      <button id="close-panel" class="close" aria-label="Close">
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
     </div>
 
     <!-- People -->
     <section id="tab-people" class="tabpanel">
-      <div class="row">
-        <button id="copy-link" class="primary">Copy my invite link</button>
-      </div>
+      <button id="copy-link" class="primary wide">Copy my invite link</button>
       <form id="add-form" class="row">
-        <input id="add-code" placeholder="Paste an invite link or code" autocomplete="off" spellcheck="false">
-        <button type="submit" class="primary">Add</button>
+        <input id="add-code" placeholder="Paste an invite link or code" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Invite link or code">
+        <button type="submit" class="tinted">Add</button>
       </form>
       <p id="add-error" class="error" hidden></p>
       <ul id="requests" class="contacts requests" hidden></ul>
@@ -66,10 +76,10 @@
     <section id="tab-route" class="tabpanel" hidden>
       <div class="row">
         <select id="profile" aria-label="Travel mode"></select>
-        <button id="pick" class="toggle">Pick destination</button>
-        <button id="clear-route" class="ghost">Clear</button>
+        <button id="pick" class="tinted toggle">Pick destination</button>
+        <button id="clear-route" class="tinted">Clear</button>
       </div>
-      <p class="muted" id="route-hint">Tap “Pick destination”, then tap the map. Your GPS position is the start.</p>
+      <p class="muted" id="route-hint">Tap “Pick destination”, then tap the map. Your position is the start.</p>
       <div id="route-summary" class="summary" hidden>
         <div><span id="r-dist">—</span><small>distance</small></div>
         <div><span id="r-time">—</span><small>time</small></div>
@@ -87,7 +97,7 @@
         <div class="muted" id="me-gps">Waiting for GPS…</div>
       </div>
 
-      <label class="switch-row">
+      <label class="group switch-row">
         <span>
           <strong>Share my position</strong>
           <small class="muted">When off, only people with admin rights over you can see you.</small>
@@ -96,41 +106,38 @@
       </label>
       <p id="admin-notice" class="notice" hidden></p>
 
-      <div class="block">
-        <div class="label">Heights</div>
+      <h3 class="label">Heights</h3>
+      <div class="group">
         <div class="kv"><span>Terrain (hoydedata)</span><b id="terrain">—</b></div>
         <div class="kv"><span>GPS altitude</span><b id="gps-alt">—</b></div>
       </div>
 
-      <div class="block">
-        <div class="label">My security code</div>
-        <p class="muted small">Ask contacts to compare this with what they see when you invite them.</p>
+      <h3 class="label">My security code</h3>
+      <div class="group pad">
         <code id="fingerprint" class="fp"></code>
+        <p class="muted small">Ask contacts to compare this with what they see when you invite them.</p>
       </div>
 
-      <div class="block">
-        <div class="label">Rendezvous server</div>
-        <p class="muted small">Where encrypted messages meet. It sees only random topic names and ciphertext. Everyone in your circle must use the same one.</p>
+      <h3 class="label">Rendezvous server</h3>
+      <div class="group pad">
         <div class="row">
-          <input id="relay" spellcheck="false" aria-label="Rendezvous server URL">
-          <button id="save-relay" class="ghost">Save</button>
+          <input id="relay" spellcheck="false" autocapitalize="off" aria-label="Rendezvous server URL">
+          <button id="save-relay" class="tinted">Save</button>
         </div>
+        <p class="muted small">Where encrypted messages meet. It sees only random topic names and ciphertext. Everyone in your circle must use the same one.</p>
       </div>
 
-      <div class="block">
-        <div class="label">About this build</div>
-        <p class="muted small">Build <code id="build">__BUILD__</code></p>
-      </div>
-
-      <div class="block">
-        <div class="label">Backup</div>
+      <h3 class="label">Backup</h3>
+      <div class="group pad">
         <p class="muted small">Your identity lives only in this browser. A backup contains your private keys.</p>
         <div class="row">
-          <button id="backup" class="ghost">Copy backup</button>
-          <button id="restore" class="ghost">Restore</button>
-          <button id="reset" class="ghost danger">Delete identity</button>
+          <button id="backup" class="tinted">Copy backup</button>
+          <button id="restore" class="tinted">Restore</button>
         </div>
+        <button id="reset" class="tinted danger wide">Delete identity</button>
       </div>
+
+      <p class="muted small build-line">Build <code id="build">__BUILD__</code></p>
     </section>
   </main>
 

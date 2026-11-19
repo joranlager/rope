@@ -68,7 +68,7 @@ function initMap() {
     center: [10.75, 59.91], zoom: 11,
     attributionControl: { compact: true },
   });
-  map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
+  map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-left');
 
   // Put the first map error on screen with the build id, so a blank map can be diagnosed from a phone.
   let mapErrorShown = false;
@@ -209,7 +209,9 @@ async function maybeUpdateTerrain() {
 async function publish(topic, obj, aes) {
   try {
     await relay.publish(topic, aes ? await seal(aes, obj) : JSON.stringify(obj));
-  } catch (err) { setStatus(err.message); }
+  } catch {
+    setStatus('Can’t reach the rendezvous server'); // a plain "Failed to fetch" tells the user nothing
+  }
 }
 
 async function sendPair(c, obj) {
@@ -517,18 +519,59 @@ async function renderProfile(coords, totalM) {
 const PANEL_TITLES = { people: 'People', route: 'Route', me: 'Me' };
 let openTab = null;
 
+let closeTimer = null;
+const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
 function openPanel(name) {
   openTab = name;
-  $('#panel').hidden = false;
+  const panel = $('#panel');
+  clearTimeout(closeTimer);
+  panel.hidden = false;
   $('#panel-title').textContent = PANEL_TITLES[name];
   for (const t of Object.keys(PANEL_TITLES)) $(`#tab-${t}`).hidden = t !== name;
   document.querySelectorAll('.menu-btn').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.tab === name)));
+  panel.style.transform = '';
+  requestAnimationFrame(() => requestAnimationFrame(() => panel.classList.add('open'))); // let it start off-screen, then slide in
 }
 
 function closePanel() {
   openTab = null;
-  $('#panel').hidden = true;
+  const panel = $('#panel');
+  panel.style.transform = '';
+  panel.classList.remove('open');
   document.querySelectorAll('.menu-btn').forEach((b) => b.setAttribute('aria-pressed', 'false'));
+  clearTimeout(closeTimer);
+  closeTimer = setTimeout(() => { if (openTab === null) panel.hidden = true; }, reducedMotion() ? 0 : 450);
+}
+
+// Drag the sheet down to dismiss it (phones), like a system sheet.
+function enableSheetDrag() {
+  const panel = $('#panel');
+  const handles = [panel.querySelector('.grabber'), panel.querySelector('.panel-head')];
+  let startY = null;
+  const phone = () => window.matchMedia('(max-width: 640px)').matches;
+  for (const h of handles) {
+    h.addEventListener('pointerdown', (e) => {
+      if (!phone() || e.target.closest('button')) return;
+      startY = e.clientY;
+      h.setPointerCapture(e.pointerId);
+      panel.classList.add('dragging');
+    });
+    h.addEventListener('pointermove', (e) => {
+      if (startY === null) return;
+      panel.style.transform = `translateY(${Math.max(0, e.clientY - startY)}px)`;
+    });
+    const end = (e) => {
+      if (startY === null) return;
+      const dy = e.clientY - startY;
+      startY = null;
+      panel.classList.remove('dragging');
+      if (dy > 90) closePanel();
+      else panel.style.transform = '';
+    };
+    h.addEventListener('pointerup', end);
+    h.addEventListener('pointercancel', end);
+  }
 }
 
 const togglePanel = (name) => (openTab === name ? closePanel() : openPanel(name));
@@ -538,6 +581,7 @@ const inviteLink = () => `${location.origin}${location.pathname}#c=${encodeCard(
 async function startApp() {
   $('#auth').hidden = true;
   $('#menu').hidden = false; // the map stays in view; panels open from the top menu
+  $('#locate').hidden = false;
   startGps(); // first, so a failure further down can't leave location unasked
   keys = await loadKeys(state.identity);
   relay = new Relay(state.relay || DEFAULT_RELAY);
@@ -605,6 +649,11 @@ function wire() {
   $('#requests').addEventListener('click', onListClick);
   document.querySelectorAll('.menu-btn').forEach((b) => b.addEventListener('click', () => togglePanel(b.dataset.tab)));
   $('#close-panel').addEventListener('click', closePanel);
+  enableSheetDrag();
+  $('#locate').addEventListener('click', () => {
+    if (myPos) map.flyTo({ center: [myPos.lon, myPos.lat], zoom: Math.max(map.getZoom(), 15) });
+    else { startGps(); setStatus('Waiting for your location…'); }
+  });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePanel(); });
 
   $('#visible').addEventListener('change', (e) => {
