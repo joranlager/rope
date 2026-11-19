@@ -197,3 +197,9 @@ button.toggle.active { background: var(--accent); color: #fff; border-color: tra
   .auth { width: calc(100vw - 32px); }
   .status { font-size: 12px; }
 }
+
+/* Security code and requests */
+.fp { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; letter-spacing: .04em; word-break: break-all; }
+.request { display: grid; gap: 8px; border-color: var(--accent); }
+.requests { margin-bottom: 12px; }
+.tabpanel .row button.primary { flex: 1; }

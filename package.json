@@ -2,13 +2,13 @@
   "name": "rope",
   "version": "0.1.0",
   "private": true,
-  "description": "Live trusted-people map on Norwegian terrain (hoydedata) with routing",
+  "description": "Single-page, serverless map for sharing live positions with trusted people",
   "type": "module",
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "start": "node server/index.js",
+    "start": "node scripts/serve.mjs",
     "build": "node scripts/build.mjs",
     "test": "node --test test/*.test.js"
   }

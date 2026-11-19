@@ -1,78 +1,76 @@
 # Rope
 
-A single-page map that shows your GPS position and the positions of people you trust,
-with live distances in metres, terrain heights from Kartverket's hoydedata, and routing.
+A single-page web app with no backend of its own. It shows your GPS position on Kartverket's
+topographic map, shares live positions with a circle of trusted people, shows the distance to
+each of them in metres, adds terrain heights from hoydedata, and plans routes.
 
-## Run
-
-Requires Node 20 or newer. No npm install is needed; the server has no dependencies.
+It is plain static files, so it runs on GitHub Pages.
 
 ```bash
-npm start          # http://localhost:8080
-npm test           # unit tests for distance and the privacy rules
+npm start      # http://localhost:8080 (local static server)
+npm test       # crypto, visibility/admin rules, distance
+npm run build  # copies public/ to dist/
 ```
 
-Environment variables (all optional):
+Browsers only give GPS and WebCrypto on `https://` or `localhost`.
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `PORT` | `8080` | HTTP port |
-| `DATA_FILE` | `data/store.json` | Where users, contacts and grants are saved. Positions are kept in memory only. |
-| `ROUTING_CAR` | OSRM demo, driving | Base URL for car routing (OSRM `route/v1` API) |
-| `ROUTING_FOOT` / `ROUTING_BIKE` | unset | Enable walk / bike routing by pointing at your own OSRM (or compatible) server |
-| `ELEVATION_URL` | `https://ws.geonorge.no/hoydedata/v1/punkt` | Kartverket hoydedata point service |
+## How people find each other without a backend
 
-Browsers only give GPS on `https://` or `localhost`. Put the app behind TLS before using it on a phone.
+People can't connect directly without something to meet on. Rope uses a **rendezvous server**:
+a public [ntfy](https://ntfy.sh) publish/subscribe relay (default `https://ntfy.sh`). It is not
+ours and holds no accounts. It sees topic names and ciphertext only. You can point Rope at your
+own ntfy server under **Me → Rendezvous server**. Everyone in a circle must use the same one.
 
-## How it works
-
-- **Map:** MapLibre GL with Kartverket's topographic raster tiles (`© Kartverket`).
-- **Position:** the browser's `watchPosition`. Pings go to the server about every 2 seconds.
-- **Heights:** the server proxies hoydedata (`koordsys=4258`) and caches results. The app shows
-  terrain height at your position and an elevation profile with ascent and descent for each route.
-- **Routing:** OSRM. The demo server only has the car profile, so walk and bike need your own instance.
-- **Distance:** straight-line (haversine) in metres, recomputed as positions update.
-
-## Contacts and secrets
-
-- Each person has a **reusable contact code** (`<userId>.<secret>`). Paste someone's code to connect.
-  Connecting is mutual and idempotent.
-- **Rotate code** invalidates the old secret. Existing contacts stay.
-- Nicknames are local to each person, so you can name a contact differently from their own name.
+1. **Identity.** On first run your browser creates two keys (ECDH for pairing, ECDSA for signing)
+   and stores them in `localStorage`. Nothing is uploaded.
+2. **Invite.** *Copy my invite link* gives a reusable link (`…#c=<card>`). The card holds your name
+   and public keys. The part after `#` is never sent to a web server.
+3. **Request.** The person who opens the link sends a request to your inbox topic on the
+   rendezvous server. You see it with a security code and accept or decline.
+4. **Per-contact secret.** On accept, both sides derive the same secret from their keys (ECDH).
+   It gives each contact its own AES-GCM key and its own unguessable topic.
+5. **Sharing.** Positions are encrypted and published to that contact's topic every 10 s.
+   The rendezvous server only relays ciphertext.
 
 ## Visibility and admin rights
 
-- Each person can turn **Share my position** off. Contacts then see them as hidden.
-- An **admin grant** is directional: when A makes B their admin, A can see B's position even
-  when B's sharing is off.
-- Only the admin can create or remove a grant. The subject gets `403` if they try to revoke it,
-  remove the contact, or change it. The subject can see that the grant exists (`adminsOverMe`)
-  and that their toggle is overridden.
-- These rules are enforced in `server/store.js`, not in the browser.
+- **Share my position** off: your client stops sending to everyone except your admins, and tells
+  contacts you're hidden.
+- **Admin:** *Make me admin* on a contact sends them a grant signed with your signing key.
+  Their client then keeps sending to you even when they hide, and shows the grant as locked.
+- The subject can't forge a revocation: grants are verified against the admin's public signing key,
+  and stale or replayed grants are ignored. They can't remove the contact in the UI while it's in force.
+
+### What this does and doesn't guarantee
+
+With no server, the subject's own device decides what it sends. Rope makes the admin grant
+unforgeable and sticky in the app, but **someone who modifies their client, clears their browser
+data, or uses another device can stop sending**. Treat this as parental control among people who
+use the app as intended, not as protection against a determined technical child. A tamper-proof
+guarantee needs software the subject can't control, such as a managed device.
+
+## Limits and things to verify
+
+- **Not yet exercised against live services.** The build environment couldn't reach ntfy.sh,
+  Kartverket, Geonorge or the CDN. These need a check in a real browser: ntfy's `/sse` endpoint
+  and CORS, the hoydedata response shape (`punkter[0].z`) and CORS, the Kartverket tile URL, and
+  the OSRM responses.
+- Public ntfy.sh is rate limited and keeps messages only for a limited time. Use your own server
+  for regular use.
+- Routing uses the OSRM demo server (car only). Walk and bike need a different routing service.
+- Your private keys live only in this browser. Use **Me → Copy backup** and keep it secret.
+- No SRI hashes on the MapLibre CDN tags yet.
 
 ## Layout
 
 ```
-server/index.js    entry point
-server/app.js      HTTP routes, static files, hoydedata proxy, CSP headers
-server/store.js    users, contacts, grants, visibility and privacy rules
-public/index.html  single page
-public/app.js      map, GPS, people, routing, elevation profile
-public/geo.js      haversine and elevation helpers (shared with tests)
-test/              node:test unit tests
+public/index.html  the single page (with a Content-Security-Policy meta tag)
+public/app.js      UI, GPS, contacts, handshake, messaging, routing
+public/crypto.js   keys, cards, ECDH/HKDF, AES-GCM, signatures
+public/net.js      ntfy publish/subscribe
+public/social.js   pure visibility and admin rules (unit tested)
+public/geo.js      haversine, elevation helpers
 ```
 
-## Known limitations and things to verify
-
-- **Live APIs not yet exercised.** The build environment could not reach Kartverket, Geonorge
-  or the map CDN, so the tile URL, the hoydedata response shape (`punkter[0].z`) and the
-  OSRM responses are written from documentation and not checked against live responses.
-  Run it once on your machine and check the Heights and route profile.
-- **Identity** is a bearer token kept in `localStorage`. Clearing site data loses the account
-  unless you have saved the code. Add real sign-in before using this outside a trusted group.
-- **Consent:** whoever holds your code can connect to you and, once connected, can be made
-  admin over you by the other party only with a grant that you can see but not remove. Treat
-  codes like invitations.
-- **Subresource integrity** is not set on the MapLibre `<script>`/`<link>` tags. Add `integrity`
-  hashes if you host it publicly.
-- **Positions are in memory.** Restarting the server clears live positions, though not accounts.
+Every branch builds with `.github/workflows/pages.yml` and deploys to GitHub Pages. All branches
+share one site, so the latest deploy wins.

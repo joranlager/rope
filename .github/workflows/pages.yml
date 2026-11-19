@@ -33,8 +33,6 @@ jobs:
 
       - name: Build site
         run: npm run build
-        env:
-          ROPE_API_BASE: ${{ vars.ROPE_API_BASE }}
 
       - uses: actions/upload-pages-artifact@v3
         with:

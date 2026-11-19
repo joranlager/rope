@@ -1,52 +1,52 @@
 import { haversineM, formatMetres, elevationGainLoss } from './geo.js';
+import {
+  newIdentity, loadKeys, cardOf, encodeCard, decodeCard, fingerprint, inboxTopic,
+  deriveSecret, channelFromSecret, seal, open, signObj, verifyObj,
+} from './crypto.js';
+import { Relay, DEFAULT_RELAY } from './net.js';
+import {
+  shouldSendPosition, theyCanSeeMe, seeingThem, canRemoveContact,
+  applyPairMessage, adminPayload, isStale,
+} from './social.js';
 
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
-const TOKEN_KEY = 'rope.token';
-const storage = {
-  get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
-  set: (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } },
-  del: (k) => { try { localStorage.removeItem(k); } catch { /* ignore */ } },
-};
+const STORE_KEY = 'rope.v1';
+const ELEVATION_URL = 'https://ws.geonorge.no/hoydedata/v1/punkt';
+const ROUTING = { car: 'https://router.project-osrm.org/route/v1/driving' };
+const SEND_EVERY_MS = 10_000; // public relays rate-limit; this keeps a few contacts well inside it
 
-let token = storage.get(TOKEN_KEY);
-let config = null;
-let state = null;      // last /api/state payload
-let myPos = null;      // { lat, lon, accuracy, altitude }
-let map = null;
-let myMarker = null;
-let destMarker = null;
-let routeMode = false;
-let destination = null;
-const markers = new Map();
+// ---------- local state ----------
+// state = { identity, visible, relay, contacts: { [id]: contact } }
+// contact = { id, name, e, s, status: 'pending'|'request'|'active', nick, secret,
+//             theirVisible, youAdminThem, adminOverMe, adminTs, adminTouched, pos }
+let state = null;
+let keys = null;                 // imported private keys
+let relay = null;
+const channels = new Map();      // contact id -> { aes, topic }
+let myPos = null;
 let lastSent = 0;
-let terrainFor = null; // position the terrain height was last fetched for
-let terrainAt = 0;
+let map = null, myMarker = null, destMarker = null, routeMode = false, destination = null;
+const markers = new Map();
+let terrainFor = null, terrainAt = 0;
 
-// ---------- API ----------
-
-const API_BASE = (window.ROPE_API_BASE || '').replace(/\/$/, '');
-
-async function api(method, url, body) {
-  const res = await fetch(API_BASE + url, {
-    method,
-    headers: {
-      ...(body ? { 'Content-Type': 'application/json' } : {}),
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (res.status === 204) return null;
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`);
-  return data;
+function loadState() {
+  try {
+    const s = JSON.parse(localStorage.getItem(STORE_KEY));
+    return s?.identity ? s : null;
+  } catch { return null; }
 }
-
-function setStatus(text) {
-  $('#status').textContent = text;
+function saveState() {
+  try {
+    const copy = { ...state, contacts: Object.fromEntries(Object.entries(state.contacts).map(([id, c]) => [id, { ...c, pos: undefined }])) };
+    localStorage.setItem(STORE_KEY, JSON.stringify(copy));
+  } catch { /* storage unavailable; the session still works */ }
 }
+const setStatus = (t) => { $('#status').textContent = t; };
+const me = () => ({ visible: state.visible });
+const activeContacts = () => Object.values(state.contacts).filter((c) => c.status === 'active');
 
 // ---------- map ----------
 
@@ -59,115 +59,94 @@ function initMap() {
         topo: {
           type: 'raster',
           tiles: ['https://cache.kartverket.no/topo/v1/wmts/1.0.0/topo/default/webmercator/{z}/{y}/{x}.png'],
-          tileSize: 256,
-          maxzoom: 18,
+          tileSize: 256, maxzoom: 18,
           attribution: '© <a href="https://www.kartverket.no/">Kartverket</a>',
         },
       },
       layers: [{ id: 'topo', type: 'raster', source: 'topo' }],
     },
-    center: [10.75, 59.91],
-    zoom: 11,
+    center: [10.75, 59.91], zoom: 11,
     attributionControl: { compact: true },
   });
   map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
-  map.addControl(new maplibregl.GeolocateControl({ trackUserLocation: false }), 'bottom-right');
-
   map.on('load', () => {
     map.addSource('route', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
     map.addLayer({
-      id: 'route-line',
-      type: 'line',
-      source: 'route',
+      id: 'route-line', type: 'line', source: 'route',
       paint: { 'line-color': '#2563eb', 'line-width': 5, 'line-opacity': 0.85 },
       layout: { 'line-cap': 'round', 'line-join': 'round' },
     });
   });
-
   map.on('click', (e) => {
-    if (!routeMode) return;
-    setDestination({ lat: e.lngLat.lat, lon: e.lngLat.lng });
+    if (routeMode) setDestination({ lat: e.lngLat.lat, lon: e.lngLat.lng });
   });
 }
 
-function makeMarker(cls, text, color) {
+function makeEl(cls, text, color) {
   const el = document.createElement('div');
   el.className = cls;
   el.textContent = text;
   if (color) el.style.background = color;
   return el;
 }
-
 function colorFor(id) {
   let h = 0;
   for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
   return `hsl(${h % 360} 65% 45%)`;
 }
+const initials = (n) => n.split(/\s+/).filter(Boolean).slice(0, 2).map((p) => p[0].toUpperCase()).join('') || '?';
+const label = (c) => c.nick || c.name;
 
-const initials = (name) =>
-  name.split(/\s+/).filter(Boolean).slice(0, 2).map((p) => p[0].toUpperCase()).join('') || '?';
-
-function renderMyMarker() {
-  if (!myPos) return;
-  const ll = [myPos.lon, myPos.lat];
-  if (!myMarker) {
-    myMarker = new maplibregl.Marker({ element: makeMarker('me-dot', '', null) }).setLngLat(ll).addTo(map);
-  } else {
-    myMarker.setLngLat(ll);
-  }
-}
-
-function renderContactMarkers() {
+function renderMarkers() {
   const seen = new Set();
-  for (const c of state.contacts) {
-    if (!c.position) continue;
+  for (const c of activeContacts()) {
+    if (!c.pos || isStale(c.pos) || !seeingThem(c)) continue;
     seen.add(c.id);
-    const ll = [c.position.lon, c.position.lat];
-    const existing = markers.get(c.id);
-    if (existing) {
-      existing.setLngLat(ll);
-    } else {
-      const el = makeMarker('person', initials(c.nick ?? c.name), colorFor(c.id));
-      el.title = c.nick ?? c.name;
+    const ll = [c.pos.lon, c.pos.lat];
+    const m = markers.get(c.id);
+    if (m) m.setLngLat(ll);
+    else {
+      const el = makeEl('person', initials(label(c)), colorFor(c.id));
+      el.title = label(c);
       markers.set(c.id, new maplibregl.Marker({ element: el }).setLngLat(ll).addTo(map));
     }
   }
-  for (const [id, m] of markers) {
-    if (!seen.has(id)) {
-      m.remove();
-      markers.delete(id);
-    }
-  }
+  for (const [id, m] of markers) if (!seen.has(id)) { m.remove(); markers.delete(id); }
 }
 
 // ---------- GPS and heights ----------
 
 function startGps() {
-  if (!('geolocation' in navigator)) {
-    setStatus('No GPS support in this browser');
-    return;
-  }
-  navigator.geolocation.watchPosition(
-    onFix,
-    (err) => setStatus(`GPS: ${err.message}`),
-    { enableHighAccuracy: true, maximumAge: 3000, timeout: 20000 },
-  );
+  if (!('geolocation' in navigator)) return setStatus('No GPS support in this browser');
+  navigator.geolocation.watchPosition(onFix, (err) => setStatus(`GPS: ${err.message}`),
+    { enableHighAccuracy: true, maximumAge: 3000, timeout: 20000 });
 }
 
 function onFix(p) {
   const { latitude: lat, longitude: lon, accuracy, altitude } = p.coords;
-  myPos = { lat, lon, accuracy, altitude };
-  renderMyMarker();
+  myPos = { lat, lon, acc: accuracy };
+  if (!myMarker) myMarker = new maplibregl.Marker({ element: makeEl('me-dot', '') }).setLngLat([lon, lat]).addTo(map);
+  else myMarker.setLngLat([lon, lat]);
   $('#me-gps').textContent = `±${Math.round(accuracy)} m accuracy`;
   $('#gps-alt').textContent = altitude == null ? 'n/a' : `${Math.round(altitude)} m`;
   setStatus('GPS live');
-
-  if (Date.now() - lastSent > 2000) {
-    lastSent = Date.now();
-    api('POST', '/api/position', { lat, lon, accuracy }).catch(() => {});
-  }
+  maybeSendPosition();
   maybeUpdateTerrain();
   renderContacts();
+}
+
+const elevationCache = new Map();
+async function elevationAt(lat, lon) {
+  const key = `${lat.toFixed(5)},${lon.toFixed(5)}`;
+  if (elevationCache.has(key)) return elevationCache.get(key);
+  const u = new URL(ELEVATION_URL);
+  u.search = new URLSearchParams({ nord: lat, ost: lon, koordsys: '4258', geojson: 'false' });
+  const res = await fetch(u);
+  if (!res.ok) throw new Error(`Elevation service returned ${res.status}`);
+  const z = (await res.json())?.punkter?.[0]?.z;
+  const value = typeof z === 'number' && Number.isFinite(z) ? Math.round(z * 10) / 10 : null;
+  elevationCache.set(key, value);
+  return value;
 }
 
 async function maybeUpdateTerrain() {
@@ -177,70 +156,185 @@ async function maybeUpdateTerrain() {
   terrainFor = { lat: myPos.lat, lon: myPos.lon };
   terrainAt = Date.now();
   try {
-    const { elevation } = await api('GET', `/api/elevation?lat=${myPos.lat}&lon=${myPos.lon}`);
-    $('#terrain').textContent = elevation == null ? 'outside coverage' : `${elevation.toFixed(1)} m a.s.l.`;
-  } catch {
-    $('#terrain').textContent = 'unavailable';
+    const h = await elevationAt(myPos.lat, myPos.lon);
+    $('#terrain').textContent = h == null ? 'outside coverage' : `${h.toFixed(1)} m a.s.l.`;
+  } catch { $('#terrain').textContent = 'unavailable'; }
+}
+
+// ---------- messaging ----------
+
+async function publish(topic, obj, aes) {
+  try {
+    await relay.publish(topic, aes ? await seal(aes, obj) : JSON.stringify(obj));
+  } catch (err) { setStatus(err.message); }
+}
+
+async function sendPair(c, obj) {
+  const ch = channels.get(c.id);
+  if (ch) await publish(ch.topic, obj, ch.aes);
+}
+
+function maybeSendPosition(force = false) {
+  if (!myPos || (!force && Date.now() - lastSent < SEND_EVERY_MS)) return;
+  lastSent = Date.now();
+  for (const c of activeContacts()) {
+    if (shouldSendPosition(me(), c)) sendPair(c, { t: 'pos', ts: Date.now(), lat: myPos.lat, lon: myPos.lon, acc: myPos.acc });
   }
 }
 
-// ---------- people ----------
+async function sendAdminState(c) {
+  const obj = adminPayload(c.youAdminThem === true, Date.now());
+  await sendPair(c, { ...obj, sig: await signObj(keys.ecdsa, obj) });
+}
+
+async function openChannel(c) {
+  const ch = await channelFromSecret(c.secret);
+  channels.set(c.id, ch);
+  relay.subscribe(ch.topic, (text) => onPairMessage(c.id, text));
+}
+
+async function onPairMessage(id, text) {
+  const c = state.contacts[id];
+  const ch = channels.get(id);
+  if (!c || !ch) return;
+  const msg = await open(ch.aes, text);
+  if (!msg) return;
+  let adminVerified = false;
+  if (msg.t === 'admin') {
+    adminVerified = await verifyObj(c.s, adminPayload(msg.on, msg.ts), msg.sig);
+  }
+  const patch = applyPairMessage(c, msg, { adminVerified });
+  if (!Object.keys(patch).length) return;
+  Object.assign(c, patch);
+  saveState();
+  renderAll();
+}
+
+async function activate(c) {
+  c.secret = await deriveSecret(keys.ecdh, c.e);
+  c.status = 'active';
+  await openChannel(c);
+  saveState();
+  await sendPair(c, { t: 'vis', v: state.visible });
+  if (c.adminTouched) await sendAdminState(c);
+  renderAll();
+}
+
+async function onInboxMessage(text) {
+  let msg;
+  try { msg = JSON.parse(text); } catch { return; }
+  if (!msg || (msg.t !== 'hello' && msg.t !== 'ack')) return;
+  let card;
+  try { card = decodeCard(typeof msg.card === 'string' ? msg.card : ''); } catch { return; }
+  const id = await fingerprint(card.e);
+  if (id === state.identity.id) return;
+  const c = state.contacts[id];
+  if (c?.status === 'active') return;
+  if (c?.status === 'pending') {
+    Object.assign(c, { name: card.n, e: card.e, s: card.s });
+    await activate(c);
+    if (msg.t === 'hello') await publish(await inboxTopic(card.e), { t: 'ack', card: encodeCard(cardOf(state.identity)) });
+    return;
+  }
+  if (msg.t === 'ack') return; // an ack is only meaningful for a request we made
+  state.contacts[id] = { id, name: card.n, e: card.e, s: card.s, status: 'request' };
+  saveState();
+  renderAll();
+}
+
+async function addContactFromCode(raw) {
+  let code = String(raw).trim();
+  const m = /[#&]c=([A-Za-z0-9_-]+)/.exec(code);
+  if (m) code = m[1];
+  const card = decodeCard(code);
+  const id = await fingerprint(card.e);
+  if (id === state.identity.id) throw new Error('That is your own code');
+  const existing = state.contacts[id];
+  if (existing?.status === 'active') throw new Error(`${existing.name} is already a contact`);
+  state.contacts[id] = { ...(existing ?? {}), id, name: card.n, e: card.e, s: card.s, status: existing?.status === 'request' ? 'request' : 'pending' };
+  saveState();
+  if (state.contacts[id].status === 'request') await acceptRequest(id);
+  else await publish(await inboxTopic(card.e), { t: 'hello', card: encodeCard(cardOf(state.identity)) });
+  renderAll();
+}
+
+async function acceptRequest(id) {
+  const c = state.contacts[id];
+  await activate(c);
+  await publish(await inboxTopic(c.e), { t: 'ack', card: encodeCard(cardOf(state.identity)) });
+}
+
+// ---------- rendering ----------
 
 function renderMe() {
-  const me = state.me;
-  $('#me-name').textContent = me.name;
-  $('#visible').checked = me.visible;
-  $('#my-code').value = me.code;
+  $('#me-name').textContent = state.identity.name;
+  $('#visible').checked = state.visible;
+  $('#relay').value = state.relay;
+  $('#fingerprint').textContent = state.identity.id.match(/.{1,4}/g).join(' ');
+  const admins = activeContacts().filter((c) => c.adminOverMe).map(label);
   const notice = $('#admin-notice');
-  if (me.adminsOverMe.length) {
-    notice.hidden = false;
-    notice.textContent = `${me.adminsOverMe.join(', ')} can see you even when sharing is off. This is set by them and cannot be changed here.`;
-  } else {
-    notice.hidden = true;
-  }
+  notice.hidden = !admins.length;
+  if (admins.length) notice.textContent = `${admins.join(', ')} can see you even when sharing is off. This is set by them and cannot be changed here.`;
+  $('#visible').disabled = false;
+}
+
+function renderRequests() {
+  const reqs = Object.values(state.contacts).filter((c) => c.status === 'request');
+  const ul = $('#requests');
+  ul.hidden = !reqs.length;
+  ul.innerHTML = reqs.map((c) => `
+    <li class="contact request">
+      <div class="who"><div class="name">${esc(c.name)} wants to connect</div>
+      <div class="muted small">Check that this code matches theirs: <code class="fp" data-fp="${esc(c.id)}">${esc(c.id.match(/.{1,4}/g).join(' '))}</code></div></div>
+      <div class="contact-actions">
+        <button class="primary" data-act="accept" data-id="${esc(c.id)}">Accept</button>
+        <button class="ghost danger" data-act="decline" data-id="${esc(c.id)}">Decline</button>
+      </div>
+    </li>`).join('');
 }
 
 function renderContacts() {
   const list = $('#contacts');
-  if (!state) return;
-  if (!state.contacts.length) {
-    list.innerHTML = '<li class="muted empty">No contacts yet. Share your code, or paste theirs above.</li>';
+  const all = Object.values(state.contacts).filter((c) => c.status !== 'request').sort((a, b) => label(a).localeCompare(label(b)));
+  if (!all.length) {
+    list.innerHTML = '<li class="muted empty">No contacts yet. Share your invite link, or paste someone else’s link above.</li>';
     return;
   }
-  list.innerHTML = state.contacts.map((c) => {
-    const label = c.nick ? `${esc(c.nick)} <small class="muted">(${esc(c.name)})</small>` : esc(c.name);
-    let dist = '—';
-    if (myPos && c.position) dist = formatMetres(haversineM(myPos.lat, myPos.lon, c.position.lat, c.position.lon));
+  list.innerHTML = all.map((c) => {
+    const id = esc(c.id);
+    if (c.status === 'pending') {
+      return `<li class="contact"><div class="contact-head"><div class="avatar" style="background:${colorFor(c.id)}">${esc(initials(c.name))}</div>
+        <div class="who"><div class="name">${esc(c.name)}</div><div class="muted small">Waiting for them to accept</div></div></div>
+        <div class="contact-actions"><button class="ghost danger" data-act="remove" data-id="${id}">Cancel</button></div></li>`;
+    }
+    const visibleNow = seeingThem(c) && c.pos && !isStale(c.pos);
+    const dist = myPos && visibleNow ? formatMetres(haversineM(myPos.lat, myPos.lon, c.pos.lat, c.pos.lon)) : '—';
     let status;
-    if (c.position && c.youAdminThem && !c.visible) status = 'Visible to you as admin';
-    else if (c.position) status = 'Live';
-    else if (c.hidden) status = 'Hidden by them';
-    else status = 'No position yet';
-    const lock = c.themAdminYou
-      ? '<span class="chip lock">Admin set · locked</span>'
-      : '';
-    const adminBtn = c.themAdminYou
-      ? ''
-      : `<button class="ghost" data-act="admin" data-id="${c.id}" data-on="${!c.youAdminThem}">${c.youAdminThem ? 'Remove my admin' : 'Make me admin'}</button>`;
-    const removeBtn = c.themAdminYou
-      ? '<button class="ghost" disabled title="Locked by an admin">Remove</button>'
-      : `<button class="ghost danger" data-act="remove" data-id="${c.id}">Remove</button>`;
+    if (visibleNow && c.youAdminThem && !c.theirVisible) status = 'Visible to you as admin';
+    else if (visibleNow) status = 'Live';
+    else if (!seeingThem(c)) status = 'Hidden by them';
+    else status = c.pos ? 'Last position is old' : 'No position yet';
+    const lock = c.adminOverMe ? '<span class="chip lock">Admin set · locked</span>' : '';
+    const adminBtn = c.adminOverMe ? '' :
+      `<button class="ghost" data-act="admin" data-id="${id}" data-on="${!c.youAdminThem}">${c.youAdminThem ? 'Remove my admin' : 'Make me admin'}</button>`;
+    const removeBtn = canRemoveContact(c)
+      ? `<button class="ghost danger" data-act="remove" data-id="${id}">Remove</button>`
+      : '<button class="ghost" disabled title="Locked by an admin">Remove</button>';
     return `
       <li class="contact">
         <div class="contact-head">
-          <div class="avatar" style="background:${colorFor(c.id)}">${esc(initials(c.nick ?? c.name))}</div>
+          <div class="avatar" style="background:${colorFor(c.id)}">${esc(initials(label(c)))}</div>
           <div class="who">
-            <div class="name">${label}</div>
-            <div class="muted small">${esc(status)} · they ${c.theyCanSeeYou ? 'can' : 'cannot'} see you</div>
+            <div class="name">${esc(c.nick || c.name)}${c.nick ? ` <small class="muted">(${esc(c.name)})</small>` : ''}</div>
+            <div class="muted small">${esc(status)} · they ${theyCanSeeMe(me(), c) ? 'can' : 'cannot'} see you</div>
           </div>
           <div class="dist" title="Straight-line distance">${dist}</div>
         </div>
         <div class="contact-actions">
           ${lock}
-          ${c.position ? `<button class="ghost" data-act="focus" data-id="${c.id}">Show</button>` : ''}
-          <button class="ghost" data-act="nick" data-id="${c.id}">Nickname</button>
-          ${adminBtn}
-          ${removeBtn}
+          ${visibleNow ? `<button class="ghost" data-act="focus" data-id="${id}">Show</button>` : ''}
+          <button class="ghost" data-act="nick" data-id="${id}">Nickname</button>
+          ${adminBtn}${removeBtn}
         </div>
       </li>`;
   }).join('');
@@ -248,98 +342,63 @@ function renderContacts() {
 
 function renderAll() {
   renderMe();
+  renderRequests();
   renderContacts();
-  renderContactMarkers();
+  renderMarkers();
 }
 
-async function refresh() {
-  state = await api('GET', '/api/state');
-  renderAll();
-}
-
-function startPolling() {
-  setInterval(() => {
-    if (token && state) refresh().catch(() => {});
-  }, 4000);
-}
-
-async function onContactsClick(e) {
+async function onListClick(e) {
   const btn = e.target.closest('button[data-act]');
   if (!btn) return;
-  const id = btn.dataset.id;
-  const contact = state.contacts.find((c) => c.id === id);
+  const c = state.contacts[btn.dataset.id];
+  if (!c) return;
   try {
-    if (btn.dataset.act === 'focus' && contact?.position) {
-      map.flyTo({ center: [contact.position.lon, contact.position.lat], zoom: Math.max(map.getZoom(), 14) });
-      selectTab('people');
-      return;
+    switch (btn.dataset.act) {
+      case 'accept': await acceptRequest(c.id); break;
+      case 'decline': delete state.contacts[c.id]; break;
+      case 'focus':
+        map.flyTo({ center: [c.pos.lon, c.pos.lat], zoom: Math.max(map.getZoom(), 14) });
+        return;
+      case 'nick': {
+        const nick = prompt(`Nickname for ${c.name} (empty to clear)`, c.nick ?? '');
+        if (nick === null) return;
+        c.nick = nick.trim().slice(0, 40) || undefined;
+        break;
+      }
+      case 'admin': {
+        const on = btn.dataset.on === 'true';
+        if (on && !confirm(`Make yourself admin over ${c.name}? You will see their position even when they turn sharing off, and they cannot remove this.`)) return;
+        c.youAdminThem = on;
+        c.adminTouched = true;
+        await sendAdminState(c);
+        break;
+      }
+      case 'remove':
+        if (c.status === 'active' && !canRemoveContact(c)) return setStatus('An admin has set this. Only they can change it.');
+        if (!confirm(`Remove ${c.name}?`)) return;
+        if (channels.has(c.id)) { relay.unsubscribe(channels.get(c.id).topic); channels.delete(c.id); }
+        delete state.contacts[c.id];
+        break;
     }
-    if (btn.dataset.act === 'nick') {
-      const nick = prompt(`Nickname for ${contact.name} (empty to clear)`, contact.nick ?? '');
-      if (nick === null) return;
-      await api('PATCH', `/api/contacts/${id}`, { nick });
-    }
-    if (btn.dataset.act === 'admin') {
-      const on = btn.dataset.on === 'true';
-      if (on && !confirm(`Give yourself admin rights over ${contact.name}? They will see that you can see them, and cannot remove this.`)) return;
-      await api('PUT', `/api/contacts/${id}/admin`, { admin: on });
-    }
-    if (btn.dataset.act === 'remove') {
-      if (!confirm(`Remove ${contact.name} from your contacts?`)) return;
-      await api('DELETE', `/api/contacts/${id}`);
-    }
-    await refresh();
-  } catch (err) {
-    setStatus(err.message);
-  }
+    saveState();
+    renderAll();
+  } catch (err) { setStatus(err.message); }
 }
 
 // ---------- route ----------
 
-const profileLabels = { car: 'Car', foot: 'Walk', bike: 'Bike' };
-
 function populateProfiles() {
-  const sel = $('#profile');
-  sel.innerHTML = Object.keys(config.routing)
-    .map((k) => `<option value="${k}">${profileLabels[k] ?? k}</option>`)
-    .join('');
+  $('#profile').innerHTML = Object.keys(ROUTING).map((k) => `<option value="${k}">Car</option>`).join('');
 }
 
 function setDestination(dest) {
   destination = dest;
-  if (!destMarker) {
-    destMarker = new maplibregl.Marker({ element: makeMarker('dest', '⚑', null) }).setLngLat([dest.lon, dest.lat]).addTo(map);
-  } else {
-    destMarker.setLngLat([dest.lon, dest.lat]);
-  }
+  if (!destMarker) destMarker = new maplibregl.Marker({ element: makeEl('dest', '⚑') }).setLngLat([dest.lon, dest.lat]).addTo(map);
+  else destMarker.setLngLat([dest.lon, dest.lat]);
   routeMode = false;
   $('#pick').classList.remove('active');
   $('#route-hint').textContent = 'Calculating route…';
   computeRoute();
-}
-
-async function computeRoute() {
-  $('#route-error').hidden = true;
-  if (!myPos) {
-    showRouteError('Waiting for a GPS fix to use as the start.');
-    return;
-  }
-  const base = config.routing[$('#profile').value];
-  const url = `${base}/${myPos.lon},${myPos.lat};${destination.lon},${destination.lat}?overview=full&geometries=geojson&steps=false`;
-  try {
-    const res = await fetch(url);
-    const data = await res.json();
-    if (data.code !== 'Ok' || !data.routes?.length) throw new Error(data.message ?? 'No route found');
-    const route = data.routes[0];
-    map.getSource('route').setData({ type: 'Feature', geometry: route.geometry, properties: {} });
-    $('#route-hint').textContent = '';
-    $('#route-summary').hidden = false;
-    $('#r-dist').textContent = formatMetres(route.distance);
-    $('#r-time').textContent = formatDuration(route.duration);
-    await renderProfile(route.geometry.coordinates, route.distance);
-  } catch (err) {
-    showRouteError(`Route failed: ${err.message}`);
-  }
 }
 
 function showRouteError(msg) {
@@ -348,22 +407,43 @@ function showRouteError(msg) {
   el.textContent = msg;
 }
 
-function formatDuration(s) {
-  const m = Math.round(s / 60);
-  return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
+const formatDuration = (s) => { const m = Math.round(s / 60); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`; };
+
+async function computeRoute() {
+  $('#route-error').hidden = true;
+  if (!myPos) return showRouteError('Waiting for a GPS fix to use as the start.');
+  const base = ROUTING[$('#profile').value];
+  const url = `${base}/${myPos.lon},${myPos.lat};${destination.lon},${destination.lat}?overview=full&geometries=geojson&steps=false`;
+  try {
+    const data = await (await fetch(url)).json();
+    if (data.code !== 'Ok' || !data.routes?.length) throw new Error(data.message ?? 'No route found');
+    const route = data.routes[0];
+    map.getSource('route').setData({ type: 'Feature', geometry: route.geometry, properties: {} });
+    $('#route-hint').textContent = '';
+    $('#route-summary').hidden = false;
+    $('#r-dist').textContent = formatMetres(route.distance);
+    $('#r-time').textContent = formatDuration(route.duration);
+    await renderProfile(route.geometry.coordinates, route.distance);
+  } catch (err) { showRouteError(`Route failed: ${err.message}`); }
 }
 
-// Sample up to 60 evenly spaced vertices, fetch their heights, and draw the profile.
+// Sample up to 40 evenly spaced vertices, look up their heights, and draw the profile.
 async function renderProfile(coords, totalM) {
-  const n = Math.min(60, coords.length);
+  const n = Math.min(40, coords.length);
   const idx = Array.from({ length: n }, (_, i) => Math.round((i * (coords.length - 1)) / Math.max(1, n - 1)));
   const pts = idx.map((i) => [coords[i][1], coords[i][0]]);
-  const { elevations } = await api('POST', '/api/elevations', { points: pts });
+  const elevations = new Array(pts.length).fill(null);
+  let next = 0;
+  const worker = async () => {
+    while (next < pts.length) {
+      const i = next++;
+      try { elevations[i] = await elevationAt(pts[i][0], pts[i][1]); } catch { /* leave gap */ }
+    }
+  };
+  await Promise.all(Array.from({ length: 6 }, worker));
 
   const dists = [0];
-  for (let i = 1; i < pts.length; i++) {
-    dists.push(dists[i - 1] + haversineM(pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1]));
-  }
+  for (let i = 1; i < pts.length; i++) dists.push(dists[i - 1] + haversineM(pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1]));
   const { up, down } = elevationGainLoss(elevations);
   $('#r-up').textContent = `${up} m`;
   $('#r-down').textContent = `${down} m`;
@@ -373,16 +453,9 @@ async function renderProfile(coords, totalM) {
   svg.hidden = valid.length < 2;
   if (svg.hidden) return;
   const hs = valid.map((p) => p.h);
-  const min = Math.min(...hs);
-  const max = Math.max(...hs);
-  const span = Math.max(1, max - min);
-  const W = 320, H = 110, pad = 6;
-  const total = Math.max(1, totalM);
-  const xy = valid.map((p) => {
-    const x = (p.d / total) * W;
-    const y = H - pad - ((p.h - min) / span) * (H - pad * 2);
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  });
+  const min = Math.min(...hs), max = Math.max(...hs), span = Math.max(1, max - min);
+  const W = 320, H = 110, pad = 6, total = Math.max(1, totalM);
+  const xy = valid.map((p) => `${((p.d / total) * W).toFixed(1)},${(H - pad - ((p.h - min) / span) * (H - pad * 2)).toFixed(1)}`);
   svg.innerHTML = `
     <polygon points="0,${H} ${xy.join(' ')} ${W},${H}" fill="currentColor" opacity="0.12"></polygon>
     <polyline points="${xy.join(' ')}" fill="none" stroke="currentColor" stroke-width="2" vector-effect="non-scaling-stroke"></polyline>
@@ -390,7 +463,7 @@ async function renderProfile(coords, totalM) {
     <text x="4" y="${H - 2}" font-size="10" fill="currentColor">${Math.round(min)} m</text>`;
 }
 
-// ---------- tabs and auth ----------
+// ---------- tabs, onboarding, startup ----------
 
 function selectTab(name) {
   document.querySelectorAll('.tab').forEach((t) => {
@@ -401,75 +474,111 @@ function selectTab(name) {
   for (const t of ['people', 'route', 'me']) $(`#tab-${t}`).hidden = t !== name;
 }
 
-function showAuth() {
-  $('#auth').hidden = false;
-  $('#panel').hidden = true;
-}
+const inviteLink = () => `${location.origin}${location.pathname}#c=${encodeCard(cardOf(state.identity))}`;
 
-function showApp() {
+async function startApp() {
+  keys = await loadKeys(state.identity);
+  relay = new Relay(state.relay || DEFAULT_RELAY);
   $('#auth').hidden = true;
   $('#panel').hidden = false;
+  relay.subscribe(await inboxTopic(state.identity.ecdhPub), onInboxMessage, '12h');
+  for (const c of activeContacts()) await openChannel(c);
+  for (const c of activeContacts()) if (c.adminTouched) sendAdminState(c);
+  // Re-send invites that haven't been answered yet (the rendezvous only keeps them for a while).
+  for (const c of Object.values(state.contacts)) {
+    if (c.status === 'pending') {
+      inboxTopic(c.e).then((t) => publish(t, { t: 'hello', card: encodeCard(cardOf(state.identity)) }));
+    }
+  }
+  renderAll();
+  startGps();
+  setInterval(() => { renderContacts(); renderMarkers(); }, 15_000);
+  consumeInviteFromUrl();
 }
 
-async function start() {
+function consumeInviteFromUrl() {
+  const m = /[#&]c=([A-Za-z0-9_-]+)/.exec(location.hash);
+  if (!m) return;
+  history.replaceState(null, '', location.pathname + location.search);
   try {
-    await refresh();
-    showApp();
-    startGps();
-    startPolling();
-  } catch {
-    storage.del(TOKEN_KEY);
-    token = null;
-    showAuth();
-  }
+    const card = decodeCard(m[1]);
+    $('#add-code').value = m[1];
+    $('#add-error').hidden = false;
+    $('#add-error').classList.remove('error');
+    $('#add-error').textContent = `Invite from ${card.n}. Press Add to connect.`;
+    selectTab('people');
+  } catch { /* ignore a broken link */ }
 }
 
 function wire() {
   $('#auth-form').addEventListener('submit', async (e) => {
     e.preventDefault();
+    const btn = e.submitter; btn.disabled = true;
     try {
-      const { token: t } = await api('POST', '/api/register', { name: $('#auth-name').value });
-      token = t;
-      storage.set(TOKEN_KEY, t);
-      await start();
+      state = { identity: await newIdentity($('#auth-name').value), visible: true, relay: DEFAULT_RELAY, contacts: {} };
+      saveState();
+      await startApp();
     } catch (err) {
       $('#auth-error').hidden = false;
       $('#auth-error').textContent = err.message;
+      btn.disabled = false;
     }
   });
 
   $('#add-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const err = $('#add-error');
-    err.hidden = true;
+    const out = $('#add-error');
+    out.hidden = true; out.classList.add('error');
     try {
-      await api('POST', '/api/contacts', { code: $('#add-code').value });
+      await addContactFromCode($('#add-code').value);
       $('#add-code').value = '';
-      await refresh();
-    } catch (ex) {
-      err.hidden = false;
-      err.textContent = ex.message;
-    }
+    } catch (err) { out.hidden = false; out.textContent = err.message; }
   });
 
-  $('#contacts').addEventListener('click', onContactsClick);
+  $('#copy-link').addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(inviteLink()); setStatus('Invite link copied'); }
+    catch { prompt('Copy your invite link:', inviteLink()); }
+  });
+
+  $('#contacts').addEventListener('click', onListClick);
+  $('#requests').addEventListener('click', onListClick);
   document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => selectTab(t.dataset.tab)));
 
-  $('#visible').addEventListener('change', async (e) => {
-    try {
-      await api('POST', '/api/visibility', { visible: e.target.checked });
-      await refresh();
-    } catch (err) {
-      setStatus(err.message);
-      e.target.checked = !e.target.checked;
-    }
+  $('#visible').addEventListener('change', (e) => {
+    state.visible = e.target.checked;
+    saveState();
+    for (const c of activeContacts()) sendPair(c, { t: 'vis', v: state.visible });
+    if (state.visible) maybeSendPosition(true);
+    renderAll();
   });
 
-  $('#copy-code').addEventListener('click', () => navigator.clipboard?.writeText($('#my-code').value));
-  $('#rotate-code').addEventListener('click', async () => {
-    if (!confirm('Rotate your code? The old code stops working. Existing contacts stay.')) return;
-    await api('POST', '/api/code/rotate');
-    await refresh();
+  $('#save-relay').addEventListener('click', () => {
+    const v = $('#relay').value.trim().replace(/\/$/, '');
+    if (!/^https:\/\/[^/\s]+(\/[^\s]*)?$/.test(v)) return setStatus('Relay must be an https URL');
+    state.relay = v;
+    saveState();
+    location.reload();
+  });
+
+  $('#backup').addEventListener('click', async () => {
+    const text = JSON.stringify(state);
+    try { await navigator.clipboard.writeText(text); setStatus('Backup copied. It contains your private keys: keep it secret.'); }
+    catch { prompt('Backup (contains private keys):', text); }
+  });
+  $('#restore').addEventListener('click', () => {
+    const text = prompt('Paste a backup to restore. This replaces the identity on this device.');
+    if (!text) return;
+    try {
+      const s = JSON.parse(text);
+      if (!s?.identity?.ecdhPriv || !s.identity.ecdsaPriv) throw new Error('Not a Rope backup');
+      localStorage.setItem(STORE_KEY, text);
+      location.reload();
+    } catch (err) { setStatus(err.message); }
+  });
+  $('#reset').addEventListener('click', () => {
+    if (!confirm('Delete your identity and all contacts from this device? This cannot be undone. Export a backup first.')) return;
+    try { localStorage.removeItem(STORE_KEY); } catch { /* ignore */ }
+    location.reload();
   });
 
   $('#pick').addEventListener('click', () => {
@@ -479,8 +588,7 @@ function wire() {
   });
   $('#clear-route').addEventListener('click', () => {
     destination = null;
-    destMarker?.remove();
-    destMarker = null;
+    destMarker?.remove(); destMarker = null;
     map.getSource('route').setData({ type: 'FeatureCollection', features: [] });
     $('#route-summary').hidden = true;
     $('#profile-svg').hidden = true;
@@ -489,17 +597,17 @@ function wire() {
   $('#profile').addEventListener('change', () => { if (destination) computeRoute(); });
 }
 
-async function main() {
-  config = await api('GET', '/api/config');
-  populateProfiles();
-  wire();
-  if (token) await start();
-  else showAuth();
-}
-
 function bootstrap() {
+  populateProfiles();
   initMap();
-  map.once('load', () => main().catch((err) => setStatus(err.message)));
+  wire();
+  state = loadState();
+  if (!window.crypto?.subtle) {
+    setStatus('This browser has no WebCrypto (needs https)');
+    return;
+  }
+  if (state) startApp().catch((err) => setStatus(err.message));
+  else { $('#auth').hidden = false; setStatus('Create your identity'); consumeInviteFromUrl(); }
 }
 
 bootstrap();

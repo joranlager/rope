@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light dark">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data: blob: https://cache.kartverket.no; connect-src https:; worker-src blob:">
   <title>Rope</title>
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
   <link rel="stylesheet" href="style.css">
@@ -16,13 +17,13 @@
     <div id="status" class="status" role="status">Starting…</div>
   </header>
 
-  <!-- Sign-in / first run -->
+  <!-- First run -->
   <section id="auth" class="card auth" hidden>
     <h1>Welcome to Rope</h1>
-    <p class="muted">Pick a display name. You can add trusted people with a code.</p>
+    <p class="muted">Pick a display name. Your keys are created on this device and never leave it. There is no account and no server of ours.</p>
     <form id="auth-form" class="row">
       <input id="auth-name" name="name" placeholder="Your name" maxlength="40" required autocomplete="nickname">
-      <button type="submit" class="primary">Start</button>
+      <button type="submit" class="primary">Create</button>
     </form>
     <p id="auth-error" class="error" hidden></p>
   </section>
@@ -36,11 +37,15 @@
 
     <!-- People -->
     <section id="tab-people" class="tabpanel">
+      <div class="row">
+        <button id="copy-link" class="primary">Copy my invite link</button>
+      </div>
       <form id="add-form" class="row">
-        <input id="add-code" placeholder="Paste a contact code" autocomplete="off" spellcheck="false">
+        <input id="add-code" placeholder="Paste an invite link or code" autocomplete="off" spellcheck="false">
         <button type="submit" class="primary">Add</button>
       </form>
       <p id="add-error" class="error" hidden></p>
+      <ul id="requests" class="contacts requests" hidden></ul>
       <ul id="contacts" class="contacts"></ul>
     </section>
 
@@ -65,10 +70,8 @@
     <!-- Me -->
     <section id="tab-me" class="tabpanel" hidden>
       <div class="me-head">
-        <div>
-          <div id="me-name" class="name"></div>
-          <div class="muted" id="me-gps">Waiting for GPS…</div>
-        </div>
+        <div id="me-name" class="name"></div>
+        <div class="muted" id="me-gps">Waiting for GPS…</div>
       </div>
 
       <label class="switch-row">
@@ -87,19 +90,33 @@
       </div>
 
       <div class="block">
-        <div class="label">My contact code</div>
-        <p class="muted small">Reusable. Give it only to people you trust. Rotating it invalidates the old code but keeps existing contacts.</p>
+        <div class="label">My security code</div>
+        <p class="muted small">Ask contacts to compare this with what they see when you invite them.</p>
+        <code id="fingerprint" class="fp"></code>
+      </div>
+
+      <div class="block">
+        <div class="label">Rendezvous server</div>
+        <p class="muted small">Where encrypted messages meet. It sees only random topic names and ciphertext. Everyone in your circle must use the same one.</p>
         <div class="row">
-          <input id="my-code" readonly>
-          <button id="copy-code" class="ghost">Copy</button>
+          <input id="relay" spellcheck="false" aria-label="Rendezvous server URL">
+          <button id="save-relay" class="ghost">Save</button>
         </div>
-        <button id="rotate-code" class="ghost danger">Rotate code</button>
+      </div>
+
+      <div class="block">
+        <div class="label">Backup</div>
+        <p class="muted small">Your identity lives only in this browser. A backup contains your private keys.</p>
+        <div class="row">
+          <button id="backup" class="ghost">Copy backup</button>
+          <button id="restore" class="ghost">Restore</button>
+          <button id="reset" class="ghost danger">Delete identity</button>
+        </div>
       </div>
     </section>
   </main>
 
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
-  <script src="config.js"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>
