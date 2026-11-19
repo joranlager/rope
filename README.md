@@ -41,7 +41,10 @@ own ntfy server under **Me → Rendezvous server**. Everyone in a circle must us
   the oldest end. It is **off by default** and set per person: on/off, length (250 m to 5 km, default 1 km)
   and colour. A trail starts recording when you switch it on, lives only in memory on your device, and is
   removed if that person stops sharing. You can only trail people you are allowed to see.
-- **Reload:** tap the **Rope** logo (top left) four times quickly to reload the app. A launch splash
+- **Per person:** each person's row has their own trail switch, length and colour, always visible (dimmed
+  while the trail is off, and usable before you switch it on). Tap a person on the map to jump to their
+  row; tap your own blue dot for your settings.
+- **Reload:** tap the **Rope** button (top left) four times quickly to reload the app. A launch splash
   shows on a normal start; after a four-tap reload a shorter "Reloading" splash shows instead.
 
 ## Visibility and admin rights

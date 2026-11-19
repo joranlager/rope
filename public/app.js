@@ -301,6 +301,7 @@ function renderMarkers() {
     else {
       const el = makeEl('person', initials(label(c)), colorFor(c.id));
       el.title = label(c);
+      el.addEventListener('click', (e) => { e.stopPropagation(); focusPerson(c.id); });
       markers.set(c.id, new maplibregl.Marker({ element: el }).setLngLat(ll).addTo(map));
     }
   }
@@ -352,7 +353,11 @@ function onFix(p) {
   const { latitude: lat, longitude: lon, accuracy, altitude } = p.coords;
   const firstFix = myPos === null;
   myPos = { lat, lon, acc: accuracy };
-  if (!myMarker) myMarker = new maplibregl.Marker({ element: makeEl('me-dot', '') }).setLngLat([lon, lat]).addTo(map);
+  if (!myMarker) {
+    const dot = makeEl('me-dot', '');
+    dot.addEventListener('click', (e) => { e.stopPropagation(); openPanel('me'); });
+    myMarker = new maplibregl.Marker({ element: dot }).setLngLat([lon, lat]).addTo(map);
+  }
   else myMarker.setLngLat([lon, lat]);
   $('#me-gps').textContent = `±${Math.round(accuracy)} m accuracy`;
   $('#gps-alt').textContent = altitude == null ? 'n/a' : `${Math.round(altitude)} m`;
@@ -511,8 +516,8 @@ function renderMe() {
   $('#visible').disabled = false;
   const mt = traceOf('me');
   $('#trace-me').checked = mt.on;
-  $('#trace-me-length').hidden = !mt.on;
-  $('#trace-me-color-row').hidden = !mt.on;
+  $('#trace-me-length').classList.toggle('off', !mt.on);
+  $('#trace-me-color-row').classList.toggle('off', !mt.on);
   $('#trace-me-meters').value = String(mt.meters);
   $('#trace-me-colors').innerHTML = swatchesHtml('me', mt.color);
 }
@@ -565,14 +570,15 @@ function renderContacts() {
       ? `<button class="ghost danger" data-act="remove" data-id="${id}">Remove</button>`
       : '<button class="ghost" disabled title="Locked by an admin">Remove</button>';
     const t = traceSettings(c.trace);
-    const lengths = t.on
-      ? `<select data-trace-meters data-id="${id}" aria-label="Trail length for ${esc(label(c))}">${TRACE_OPTIONS
-        .map((m) => `<option value="${m}"${m === t.meters ? ' selected' : ''}>${labelForMeters(m)}</option>`).join('')}</select>`
-      : '';
-    const traceRow = `<div class="trace-row"><span>Trail</span>${lengths}<input type="checkbox" role="switch" data-trace-on data-id="${id}" aria-label="Show trail for ${esc(label(c))}"${t.on ? ' checked' : ''}></div>`
-      + (t.on ? `<div class="swatches" role="group" aria-label="Trail colour for ${esc(label(c))}">${swatchesHtml(id, t.color)}</div>` : '');
+    const lengths = `<select data-trace-meters data-id="${id}" aria-label="Trail length for ${esc(label(c))}">${TRACE_OPTIONS
+      .map((m) => `<option value="${m}"${m === t.meters ? ' selected' : ''}>${labelForMeters(m)}</option>`).join('')}</select>`;
+    // Length and colour can be set before the trail is switched on; they are dimmed while it is off.
+    const traceRow = `<div class="trace-block${t.on ? '' : ' off'}">
+        <div class="trace-row"><span>Trail</span>${lengths}<input type="checkbox" role="switch" data-trace-on data-id="${id}" aria-label="Show trail for ${esc(label(c))}"${t.on ? ' checked' : ''}></div>
+        <div class="swatches" role="group" aria-label="Trail colour for ${esc(label(c))}">${swatchesHtml(id, t.color)}</div>
+      </div>`;
     return `
-      <li class="contact">
+      <li class="contact" data-contact="${id}">
         <div class="contact-head">
           <div class="avatar" style="background:${colorFor(c.id)}">${esc(initials(label(c)))}</div>
           <div class="who">
@@ -590,6 +596,18 @@ function renderContacts() {
         ${traceRow}
       </li>`;
   }).join('');
+}
+
+/** Open People and bring a person's row (with their trail settings) into view. */
+function focusPerson(id) {
+  openPanel('people');
+  setTimeout(() => {
+    const row = document.querySelector(`#contacts li[data-contact="${CSS.escape(id)}"]`);
+    if (!row) return;
+    row.scrollIntoView({ block: 'nearest', behavior: reducedMotion() ? 'auto' : 'smooth' });
+    row.classList.add('flash');
+    setTimeout(() => row.classList.remove('flash'), 1400);
+  }, 460); // after the sheet has slid in
 }
 
 function renderAll() {
@@ -966,28 +984,18 @@ function reloadApp() {
   setTimeout(() => location.reload(), 350);
 }
 
-// Four quick taps on the logo. Drags, long presses and multi-touch don't count, and taps more
-// than two seconds old are forgotten.
+// Four quick taps on the Rope button reload the app. This uses the button's plain click, which
+// browsers (iOS Safari included) fire for every tap; taps older than 2.5 seconds are forgotten.
+// A click also comes from the keyboard, so pressing Enter four times works too.
 function enableLogoReload() {
-  const logo = $('#brand');
-  const NEEDED = 4, WINDOW_MS = 2000, MAX_TAP_MS = 450, MAX_MOVE_PX = 12;
-  let down = null;
+  const NEEDED = 4, WINDOW_MS = 2500;
   let taps = [];
-  logo.addEventListener('pointerdown', (e) => {
-    if (!e.isPrimary) { down = null; taps = []; return; }
-    down = { t: e.timeStamp, x: e.clientX, y: e.clientY };
-  });
-  logo.addEventListener('pointerup', (e) => {
-    if (!down || !e.isPrimary) return;
-    const quick = e.timeStamp - down.t <= MAX_TAP_MS;
-    const still = Math.hypot(e.clientX - down.x, e.clientY - down.y) <= MAX_MOVE_PX;
-    down = null;
-    if (!quick || !still) { taps = []; return; }
-    taps = taps.filter((t) => e.timeStamp - t <= WINDOW_MS);
-    taps.push(e.timeStamp);
+  $('#brand').addEventListener('click', (e) => {
+    const now = e.timeStamp;
+    taps = taps.filter((t) => now - t <= WINDOW_MS);
+    taps.push(now);
     if (taps.length >= NEEDED) { taps = []; reloadApp(); }
   });
-  logo.addEventListener('pointercancel', () => { down = null; taps = []; });
 }
 
 function bootstrap() {

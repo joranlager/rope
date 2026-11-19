@@ -47,7 +47,7 @@
   <div id="map" aria-label="Map"></div>
 
   <header class="topbar">
-    <div id="brand" class="brand" role="img" aria-label="Rope. Tap four times to reload the app." title="Tap four times to reload">Rope</div>
+    <button id="brand" class="brand" type="button" aria-label="Rope. Tap four times to reload the app." title="Tap four times to reload">Rope</button>
     <nav id="menu" class="menu" aria-label="Menu" hidden>
       <button class="menu-btn" data-tab="people" aria-pressed="false">People<span id="req-badge" class="badge" hidden></span></button>
       <button class="menu-btn" data-tab="route" aria-pressed="false">Route</button>
@@ -144,11 +144,11 @@
           </span>
           <input id="trace-me" type="checkbox" role="switch">
         </label>
-        <div id="trace-me-length" class="kv" hidden>
+        <div id="trace-me-length" class="kv">
           <span>Trail length</span>
           <select id="trace-me-meters" aria-label="Length of my trail"></select>
         </div>
-        <div id="trace-me-color-row" class="kv" hidden>
+        <div id="trace-me-color-row" class="kv">
           <span>Trail colour</span>
           <div id="trace-me-colors" class="swatches" role="group" aria-label="Trail colour"></div>
         </div>
