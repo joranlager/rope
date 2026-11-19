@@ -133,7 +133,13 @@ async function serveStatic(req, res, pathname) {
   }
 }
 
-export function createApp({ dataFile = null, config = defaultConfig(), elevation, store } = {}) {
+export function createApp({
+  dataFile = null,
+  config = defaultConfig(),
+  elevation,
+  store,
+  corsOrigin = process.env.CORS_ORIGIN ?? null,
+} = {}) {
   const st = store ?? new Store(dataFile);
   const elev = elevation ?? new Elevation({ url: config.elevationUrl });
   const ready = st.load();
@@ -207,6 +213,15 @@ export function createApp({ dataFile = null, config = defaultConfig(), elevation
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'same-origin');
     res.setHeader('Content-Security-Policy', CSP);
+    // Cross-origin API access (e.g. the GitHub Pages front end). Auth is a Bearer
+    // header, not cookies, so only the explicitly configured origin is allowed.
+    if (corsOrigin && req.headers.origin === corsOrigin) {
+      res.setHeader('Access-Control-Allow-Origin', corsOrigin);
+      res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+      res.setHeader('Vary', 'Origin');
+    }
+    if (req.method === 'OPTIONS') return res.writeHead(204).end();
     try {
       await ready;
       const url = new URL(req.url, 'http://x');

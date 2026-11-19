@@ -27,8 +27,10 @@ let terrainAt = 0;
 
 // ---------- API ----------
 
+const API_BASE = (window.ROPE_API_BASE || '').replace(/\/$/, '');
+
 async function api(method, url, body) {
-  const res = await fetch(url, {
+  const res = await fetch(API_BASE + url, {
     method,
     headers: {
       ...(body ? { 'Content-Type': 'application/json' } : {}),
