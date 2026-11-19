@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Rope</title>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="map" aria-label="Map"></div>
+
+  <header class="topbar">
+    <div class="brand">Rope</div>
+    <div id="status" class="status" role="status">Starting…</div>
+  </header>
+
+  <!-- Sign-in / first run -->
+  <section id="auth" class="card auth" hidden>
+    <h1>Welcome to Rope</h1>
+    <p class="muted">Pick a display name. You can add trusted people with a code.</p>
+    <form id="auth-form" class="row">
+      <input id="auth-name" name="name" placeholder="Your name" maxlength="40" required autocomplete="nickname">
+      <button type="submit" class="primary">Start</button>
+    </form>
+    <p id="auth-error" class="error" hidden></p>
+  </section>
+
+  <main id="panel" class="panel" hidden>
+    <nav class="tabs" role="tablist">
+      <button role="tab" data-tab="people" aria-selected="true" class="tab active">People</button>
+      <button role="tab" data-tab="route" aria-selected="false" class="tab">Route</button>
+      <button role="tab" data-tab="me" aria-selected="false" class="tab">Me</button>
+    </nav>
+
+    <!-- People -->
+    <section id="tab-people" class="tabpanel">
+      <form id="add-form" class="row">
+        <input id="add-code" placeholder="Paste a contact code" autocomplete="off" spellcheck="false">
+        <button type="submit" class="primary">Add</button>
+      </form>
+      <p id="add-error" class="error" hidden></p>
+      <ul id="contacts" class="contacts"></ul>
+    </section>
+
+    <!-- Route -->
+    <section id="tab-route" class="tabpanel" hidden>
+      <div class="row">
+        <select id="profile" aria-label="Travel mode"></select>
+        <button id="pick" class="toggle">Pick destination</button>
+        <button id="clear-route" class="ghost">Clear</button>
+      </div>
+      <p class="muted" id="route-hint">Tap “Pick destination”, then tap the map. Your GPS position is the start.</p>
+      <div id="route-summary" class="summary" hidden>
+        <div><span id="r-dist">—</span><small>distance</small></div>
+        <div><span id="r-time">—</span><small>time</small></div>
+        <div><span id="r-up">—</span><small>ascent</small></div>
+        <div><span id="r-down">—</span><small>descent</small></div>
+      </div>
+      <svg id="profile-svg" viewBox="0 0 320 110" preserveAspectRatio="none" hidden aria-label="Elevation profile"></svg>
+      <p id="route-error" class="error" hidden></p>
+    </section>
+
+    <!-- Me -->
+    <section id="tab-me" class="tabpanel" hidden>
+      <div class="me-head">
+        <div>
+          <div id="me-name" class="name"></div>
+          <div class="muted" id="me-gps">Waiting for GPS…</div>
+        </div>
+      </div>
+
+      <label class="switch-row">
+        <span>
+          <strong>Share my position</strong>
+          <small class="muted">When off, only people with admin rights over you can see you.</small>
+        </span>
+        <input id="visible" type="checkbox" role="switch">
+      </label>
+      <p id="admin-notice" class="notice" hidden></p>
+
+      <div class="block">
+        <div class="label">Heights</div>
+        <div class="kv"><span>Terrain (hoydedata)</span><b id="terrain">—</b></div>
+        <div class="kv"><span>GPS altitude</span><b id="gps-alt">—</b></div>
+      </div>
+
+      <div class="block">
+        <div class="label">My contact code</div>
+        <p class="muted small">Reusable. Give it only to people you trust. Rotating it invalidates the old code but keeps existing contacts.</p>
+        <div class="row">
+          <input id="my-code" readonly>
+          <button id="copy-code" class="ghost">Copy</button>
+        </div>
+        <button id="rotate-code" class="ghost danger">Rotate code</button>
+      </div>
+    </section>
+  </main>
+
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
