@@ -32,6 +32,18 @@ own ntfy server under **Me → Rendezvous server**. Everyone in a circle must us
 5. **Sharing.** Positions are encrypted and published to that contact's topic every 10 s.
    The rendezvous server only relays ciphertext.
 
+## Following, trails and reload
+
+- **Following:** the map opens following your own position. **Show** on a person follows them. Drag the
+  map to stop. The arrow button (bottom right) resumes: after a drag it picks up what you were following,
+  and while following someone it returns to you. The arrow is filled while following you.
+- **Trails:** each person, you included, can have a trail of their last stretch of path, fading toward
+  the oldest end. It is **off by default** and set per person: on/off, length (250 m to 5 km, default 1 km)
+  and colour. A trail starts recording when you switch it on, lives only in memory on your device, and is
+  removed if that person stops sharing. You can only trail people you are allowed to see.
+- **Reload:** tap the **Rope** logo (top left) four times quickly to reload the app. A launch splash
+  shows on a normal start; after a four-tap reload a shorter "Reloading" splash shows instead.
+
 ## Visibility and admin rights
 
 - **Share my position** off: your client stops sending to everyone except your admins, and tells
@@ -72,6 +84,9 @@ public/crypto.js   keys, cards, ECDH/HKDF, AES-GCM, signatures
 public/net.js      ntfy publish/subscribe
 public/social.js   pure visibility and admin rules (unit tested)
 public/geo.js      haversine, elevation helpers
+public/follow.js   what the map is following (pure, tested)
+public/trace.js    trails: trimming, jitter, colours (pure, tested)
+public/boot.js     picks the splash before first paint
 ```
 
 Every branch builds with `.github/workflows/pages.yml` and deploys to GitHub Pages. All branches

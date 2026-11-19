@@ -13,12 +13,41 @@
   <title>Rope</title>
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
   <link rel="stylesheet" href="style.css">
+  <script src="boot.js"></script>
 </head>
 <body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <linearGradient id="logo-bg" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#5ac8fa"/><stop offset="1" stop-color="#5856d6"/>
+      </linearGradient>
+    </defs>
+    <symbol id="logo" viewBox="0 0 96 96">
+      <rect width="96" height="96" rx="22" fill="url(#logo-bg)"/>
+      <circle cx="38" cy="48" r="16" fill="none" stroke="#fff" stroke-width="6"/>
+      <circle cx="58" cy="48" r="16" fill="none" stroke="#fff" stroke-width="6" opacity="0.85"/>
+    </symbol>
+  </svg>
+
+  <!-- Splash: the launch variant by default; boot.js switches to the reload variant after a four-tap reload -->
+  <div id="splash" class="splash" role="status" aria-live="polite">
+    <div class="splash-inner splash-load">
+      <svg class="splash-icon" aria-hidden="true"><use href="#logo"/></svg>
+      <h1>Rope</h1>
+      <p>Stay close to the people you trust</p>
+      <div class="spinner" aria-hidden="true"></div>
+    </div>
+    <div class="splash-inner splash-reload">
+      <svg class="splash-icon small" aria-hidden="true"><use href="#logo"/></svg>
+      <p>Reloading…</p>
+      <div class="spinner" aria-hidden="true"></div>
+    </div>
+  </div>
+
   <div id="map" aria-label="Map"></div>
 
   <header class="topbar">
-    <div class="brand">Rope</div>
+    <div id="brand" class="brand" role="img" aria-label="Rope. Tap four times to reload the app." title="Tap four times to reload">Rope</div>
     <nav id="menu" class="menu" aria-label="Menu" hidden>
       <button class="menu-btn" data-tab="people" aria-pressed="false">People<span id="req-badge" class="badge" hidden></span></button>
       <button class="menu-btn" data-tab="route" aria-pressed="false">Route</button>
@@ -106,6 +135,24 @@
         <input id="visible" type="checkbox" role="switch">
       </label>
       <p id="admin-notice" class="notice" hidden></p>
+
+      <div class="group">
+        <label class="switch-row">
+          <span>
+            <strong>Show my trail</strong>
+            <small class="muted">Draws where you have just been on your own map, fading with distance. Off by default. It starts when you turn it on and is kept on this device only.</small>
+          </span>
+          <input id="trace-me" type="checkbox" role="switch">
+        </label>
+        <div id="trace-me-length" class="kv" hidden>
+          <span>Trail length</span>
+          <select id="trace-me-meters" aria-label="Length of my trail"></select>
+        </div>
+        <div id="trace-me-color-row" class="kv" hidden>
+          <span>Trail colour</span>
+          <div id="trace-me-colors" class="swatches" role="group" aria-label="Trail colour"></div>
+        </div>
+      </div>
 
       <h3 class="label">Heights</h3>
       <div class="group">

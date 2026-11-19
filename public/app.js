@@ -8,6 +8,10 @@ import {
   initialFollow, followPerson, dragged, arrowPressed, contactRemoved, arrowState,
 } from './follow.js';
 import {
+  TRACE_OPTIONS, TRACE_COLORS, traceSettings, addPoint, trimToDistance, toFeature, labelForMeters,
+  colorHex, hexToRgba,
+} from './trace.js';
+import {
   shouldSendPosition, theyCanSeeMe, seeingThem, canRemoveContact,
   applyPairMessage, adminPayload, isStale,
 } from './social.js';
@@ -84,12 +88,15 @@ function initMap() {
   });
   map.on('idle', () => { if (!mapErrorShown) $('#map-banner').hidden = true; });
   map.on('load', () => {
+    mapReady = true;
+    hideSplash(); // the map is ready: reveal the app (after the splash's minimum time)
     map.addSource('route', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
     map.addLayer({
       id: 'route-line', type: 'line', source: 'route',
       paint: { 'line-color': '#2563eb', 'line-width': 5, 'line-opacity': 0.85 },
       layout: { 'line-cap': 'round', 'line-join': 'round' },
     });
+    renderTraces();
   });
   map.on('click', (e) => {
     if (routeMode) setDestination({ lat: e.lngLat.lat, lon: e.lngLat.lng });
@@ -114,6 +121,109 @@ function colorFor(id) {
 }
 const initials = (n) => n.split(/\s+/).filter(Boolean).slice(0, 2).map((p) => p[0].toUpperCase()).join('') || '?';
 const label = (c) => c.nick || c.name;
+
+// ---------- trails ----------
+// Each person (me included) can have a trail: the last stretch of path, drawn so the oldest
+// part fades out. It is off by default, set per person, and kept on this device only. A trail
+// starts recording when it is switched on and is dropped when it is switched off.
+
+let mapReady = false;
+const trails = new Map(); // 'me' or contact id -> [{ lat, lon, ts }]
+
+const traceOf = (id) => traceSettings(id === 'me' ? state?.myTrace : state?.contacts[id]?.trace);
+const hueOf = (id) => { let h = 0; for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return h % 360; };
+const appliedColor = new Map(); // id -> colour setting currently on the map layer
+
+// The chosen colour, or "auto": the person's own colour (blue for me).
+function traceColor(id, a) {
+  const hex = colorHex(traceOf(id).color);
+  if (hex) return hexToRgba(hex, a);
+  return id === 'me' ? hexToRgba('#007aff', a) : `hsla(${hueOf(id)}, 65%, 45%, ${a})`;
+}
+
+// line-progress runs from the oldest end (0) to the newest (1): transparent to solid.
+const traceGradient = (id) => ['interpolate', ['linear'], ['line-progress'],
+  0, traceColor(id, 0), 0.6, traceColor(id, 0.45), 1, traceColor(id, 0.95)];
+
+function removeTraceLayer(id) {
+  const sid = `trace-${id}`;
+  appliedColor.delete(id);
+  if (!map || !mapReady) return;
+  if (map.getLayer(sid)) map.removeLayer(sid);
+  if (map.getSource(sid)) map.removeSource(sid);
+}
+
+/** Round colour swatches: Auto, then the palette. `current` is the selected colour id. */
+function swatchesHtml(id, current) {
+  const auto = `<button class="swatch auto${current === 'auto' ? ' selected' : ''}" data-act="color" data-id="${id}" data-color="auto" aria-label="Automatic colour" aria-pressed="${current === 'auto'}"></button>`;
+  return auto + TRACE_COLORS.map((c) =>
+    `<button class="swatch${current === c.id ? ' selected' : ''}" style="--c:${c.hex}" data-act="color" data-id="${id}" data-color="${c.id}" aria-label="${c.name}" aria-pressed="${current === c.id}"></button>`).join('');
+}
+
+function renderTrace(id) {
+  if (!map || !mapReady) return;
+  const trail = trails.get(id) ?? [];
+  const c = id === 'me' ? null : state.contacts[id];
+  // A trail is only shown while I may see that person and their position is fresh.
+  const visible = id === 'me' || (c && c.status === 'active' && seeingThem(c) && c.pos && !isStale(c.pos));
+  if (!traceOf(id).on || trail.length < 2 || !visible) return removeTraceLayer(id);
+
+  const sid = `trace-${id}`;
+  if (!map.getSource(sid)) {
+    map.addSource(sid, { type: 'geojson', lineMetrics: true, data: toFeature(trail) });
+    map.addLayer({
+      id: sid, type: 'line', source: sid,
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-width': 5, 'line-gradient': traceGradient(id) },
+    }, map.getLayer('route-line') ? 'route-line' : undefined);
+    appliedColor.set(id, traceOf(id).color);
+  } else {
+    map.getSource(sid).setData(toFeature(trail));
+    if (appliedColor.get(id) !== traceOf(id).color) { // the colour was changed
+      map.setPaintProperty(sid, 'line-gradient', traceGradient(id));
+      appliedColor.set(id, traceOf(id).color);
+    }
+  }
+}
+
+function renderTraces() {
+  if (!state) return;
+  for (const id of ['me', ...Object.keys(state.contacts)]) renderTrace(id);
+}
+
+function recordTrail(id, pt) {
+  const t = traceOf(id);
+  if (!t.on) return;
+  trails.set(id, addPoint(trails.get(id) ?? [], pt, t.meters));
+  renderTrace(id);
+}
+
+function clearTrail(id) {
+  trails.delete(id);
+  removeTraceLayer(id);
+}
+
+/** Turn a trail on or off, or change its length, for me ('me') or a contact. */
+function setTrace(id, patch) {
+  const before = traceOf(id);
+  const next = { ...before, ...patch };
+  if (id === 'me') state.myTrace = next;
+  else if (state.contacts[id]) state.contacts[id].trace = next;
+  else return;
+  if (!next.on) {
+    clearTrail(id);
+  } else if (!before.on) {
+    // Start recording now, from where they are right now.
+    trails.delete(id);
+    const c = id === 'me' ? null : state.contacts[id];
+    const here = id === 'me' ? myPos : (c && seeingThem(c) && c.pos && !isStale(c.pos) ? c.pos : null);
+    if (here) recordTrail(id, { lat: here.lat, lon: here.lon, ts: here.ts ?? Date.now() });
+  } else {
+    trails.set(id, trimToDistance(trails.get(id) ?? [], next.meters));
+  }
+  saveState();
+  renderAll();
+}
 
 // ---------- following ----------
 // The map opens following my own position. "Show" on a person follows them instead.
@@ -248,6 +358,7 @@ function onFix(p) {
   $('#gps-alt').textContent = altitude == null ? 'n/a' : `${Math.round(altitude)} m`;
   setStatus('GPS live');
   if (follow.target === 'me') moveToFollowed({ fresh: firstFix });
+  if (state && accuracy <= 100) recordTrail('me', { lat, lon, ts: Date.now() }); // skip very rough fixes
   maybeSendPosition();
   maybeUpdateTerrain();
   renderContacts();
@@ -326,6 +437,8 @@ async function onPairMessage(id, text) {
   const patch = applyPairMessage(c, msg, { adminVerified });
   if (!Object.keys(patch).length) return;
   Object.assign(c, patch);
+  if (patch.pos) recordTrail(id, { lat: patch.pos.lat, lon: patch.pos.lon, ts: patch.pos.ts });
+  if ('theirVisible' in patch && !seeingThem(c)) clearTrail(id); // they stopped sharing: their trail goes too
   saveState();
   renderAll();
 }
@@ -396,6 +509,12 @@ function renderMe() {
   notice.hidden = !admins.length;
   if (admins.length) notice.textContent = `${admins.join(', ')} can see you even when sharing is off. This is set by them and cannot be changed here.`;
   $('#visible').disabled = false;
+  const mt = traceOf('me');
+  $('#trace-me').checked = mt.on;
+  $('#trace-me-length').hidden = !mt.on;
+  $('#trace-me-color-row').hidden = !mt.on;
+  $('#trace-me-meters').value = String(mt.meters);
+  $('#trace-me-colors').innerHTML = swatchesHtml('me', mt.color);
 }
 
 function renderRequests() {
@@ -418,6 +537,8 @@ function renderRequests() {
 
 function renderContacts() {
   const list = $('#contacts');
+  // Don't rebuild the list under a picker that is open: it would close on the user.
+  if (document.activeElement?.tagName === 'SELECT' && list.contains(document.activeElement)) return;
   const all = Object.values(state.contacts).filter((c) => c.status !== 'request').sort((a, b) => label(a).localeCompare(label(b)));
   if (!all.length) {
     list.innerHTML = '<li class="muted empty">No contacts yet. Share your invite link, or paste someone else’s link above.</li>';
@@ -443,6 +564,13 @@ function renderContacts() {
     const removeBtn = canRemoveContact(c)
       ? `<button class="ghost danger" data-act="remove" data-id="${id}">Remove</button>`
       : '<button class="ghost" disabled title="Locked by an admin">Remove</button>';
+    const t = traceSettings(c.trace);
+    const lengths = t.on
+      ? `<select data-trace-meters data-id="${id}" aria-label="Trail length for ${esc(label(c))}">${TRACE_OPTIONS
+        .map((m) => `<option value="${m}"${m === t.meters ? ' selected' : ''}>${labelForMeters(m)}</option>`).join('')}</select>`
+      : '';
+    const traceRow = `<div class="trace-row"><span>Trail</span>${lengths}<input type="checkbox" role="switch" data-trace-on data-id="${id}" aria-label="Show trail for ${esc(label(c))}"${t.on ? ' checked' : ''}></div>`
+      + (t.on ? `<div class="swatches" role="group" aria-label="Trail colour for ${esc(label(c))}">${swatchesHtml(id, t.color)}</div>` : '');
     return `
       <li class="contact">
         <div class="contact-head">
@@ -459,6 +587,7 @@ function renderContacts() {
           <button class="ghost" data-act="nick" data-id="${id}">Nickname</button>
           ${adminBtn}${removeBtn}
         </div>
+        ${traceRow}
       </li>`;
   }).join('');
 }
@@ -468,6 +597,7 @@ function renderAll() {
   renderRequests();
   renderContacts();
   renderMarkers();
+  renderTraces();
 }
 
 async function onListClick(e) {
@@ -477,6 +607,7 @@ async function onListClick(e) {
   if (!c) return;
   try {
     switch (btn.dataset.act) {
+      case 'color': setTrace(c.id, { color: btn.dataset.color }); return; // setTrace saves and redraws
       case 'accept': await acceptRequest(c.id); break;
       case 'decline': delete state.contacts[c.id]; break;
       case 'focus':
@@ -502,6 +633,7 @@ async function onListClick(e) {
         if (!confirm(`Remove ${c.name}?`)) return;
         if (channels.has(c.id)) { relay.unsubscribe(channels.get(c.id).topic); channels.delete(c.id); }
         delete state.contacts[c.id];
+        clearTrail(c.id);
         setFollow(contactRemoved(follow, c.id)); // never keep following someone who is gone
         break;
     }
@@ -675,7 +807,7 @@ async function startApp() {
     }
   }
   renderAll();
-  setInterval(() => { renderContacts(); renderMarkers(); }, 15_000);
+  setInterval(() => { renderContacts(); renderMarkers(); renderTraces(); }, 15_000);
   consumeInviteFromUrl();
 }
 
@@ -724,6 +856,20 @@ function wire() {
   });
 
   $('#gps-retry').addEventListener('click', () => { stopGps(); startGps(); });
+
+  // Trails: per person, off by default, length chosen per person.
+  $('#contacts').addEventListener('change', (e) => {
+    const el = e.target;
+    if (el.matches('input[data-trace-on]')) setTrace(el.dataset.id, { on: el.checked });
+    else if (el.matches('select[data-trace-meters]')) setTrace(el.dataset.id, { meters: Number(el.value) });
+  });
+  $('#trace-me-meters').innerHTML = TRACE_OPTIONS.map((m) => `<option value="${m}">${labelForMeters(m)}</option>`).join('');
+  $('#trace-me').addEventListener('change', (e) => setTrace('me', { on: e.target.checked }));
+  $('#trace-me-meters').addEventListener('change', (e) => setTrace('me', { meters: Number(e.target.value) }));
+  $('#trace-me-colors').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-color]');
+    if (b) setTrace('me', { color: b.dataset.color });
+  });
 
   $('#contacts').addEventListener('click', onListClick);
   $('#requests').addEventListener('click', onListClick);
@@ -791,7 +937,62 @@ function wire() {
   $('#profile').addEventListener('change', () => { if (destination) computeRoute(); });
 }
 
+// ---------- splash and four-tap reload ----------
+// A launch splash covers startup. Tapping the Rope logo four times reloads the app; that shows
+// a shorter "Reloading" splash, and the launch splash does not run again (see boot.js).
+
+const isReloadBoot = document.documentElement.dataset.boot === 'reload';
+const splashShownAt = performance.now();
+let splashHidden = false;
+
+function hideSplash() {
+  if (splashHidden) return;
+  splashHidden = true;
+  const minimum = isReloadBoot ? 600 : 1400; // long enough to read, short enough not to get in the way
+  const wait = Math.max(0, minimum - (performance.now() - splashShownAt));
+  setTimeout(() => {
+    const splash = $('#splash');
+    splash.classList.add('hide');
+    setTimeout(() => { splash.hidden = true; }, reducedMotion() ? 0 : 550);
+  }, wait);
+}
+
+function reloadApp() {
+  try { sessionStorage.setItem('rope.reload', '1'); } catch { /* the launch splash will show instead */ }
+  document.documentElement.dataset.boot = 'reload'; // show the reload variant of the splash
+  const splash = $('#splash');
+  splash.hidden = false;
+  requestAnimationFrame(() => splash.classList.remove('hide'));
+  setTimeout(() => location.reload(), 350);
+}
+
+// Four quick taps on the logo. Drags, long presses and multi-touch don't count, and taps more
+// than two seconds old are forgotten.
+function enableLogoReload() {
+  const logo = $('#brand');
+  const NEEDED = 4, WINDOW_MS = 2000, MAX_TAP_MS = 450, MAX_MOVE_PX = 12;
+  let down = null;
+  let taps = [];
+  logo.addEventListener('pointerdown', (e) => {
+    if (!e.isPrimary) { down = null; taps = []; return; }
+    down = { t: e.timeStamp, x: e.clientX, y: e.clientY };
+  });
+  logo.addEventListener('pointerup', (e) => {
+    if (!down || !e.isPrimary) return;
+    const quick = e.timeStamp - down.t <= MAX_TAP_MS;
+    const still = Math.hypot(e.clientX - down.x, e.clientY - down.y) <= MAX_MOVE_PX;
+    down = null;
+    if (!quick || !still) { taps = []; return; }
+    taps = taps.filter((t) => e.timeStamp - t <= WINDOW_MS);
+    taps.push(e.timeStamp);
+    if (taps.length >= NEEDED) { taps = []; reloadApp(); }
+  });
+  logo.addEventListener('pointercancel', () => { down = null; taps = []; });
+}
+
 function bootstrap() {
+  enableLogoReload();
+  setTimeout(hideSplash, 6000); // never leave the splash up if something below stalls
   const build = $('#build');
   if (build.textContent.startsWith('__')) build.textContent = 'dev'; // not replaced by the Pages build
   populateProfiles();
@@ -800,9 +1001,10 @@ function bootstrap() {
   state = loadState();
   if (!window.crypto?.subtle) {
     setStatus('This browser has no WebCrypto (needs https)');
+    hideSplash();
     return;
   }
-  if (state) startApp().catch((err) => setStatus(err.message));
+  if (state) startApp().catch((err) => { setStatus(err.message); hideSplash(); });
   else { $('#auth').hidden = false; setStatus('Create your identity'); consumeInviteFromUrl(); }
 }
 
