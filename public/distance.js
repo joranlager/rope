@@ -95,3 +95,25 @@ export function visibleMidpoint(p, q, rect) {
   const seg = clipSegment(p, q, rect);
   return seg ? { x: (seg.a.x + seg.b.x) / 2, y: (seg.a.y + seg.b.y) / 2 } : null;
 }
+
+/** The point on the opposite side of `center` from `p`, as the map draws it. */
+export function mirrorAround(center, p) {
+  const c = toMercator(center);
+  const q = toMercator(p);
+  return fromMercator({ x: 2 * c.x - q.x, y: 2 * c.y - q.y });
+}
+
+/**
+ * Bounds that contain every point and are centred exactly on `center` (as the map draws it).
+ * Fitting the map to these keeps me in the middle while everyone else is in view.
+ * Returns [[west, south], [east, north]].
+ */
+export function symmetricBounds(center, points) {
+  const all = [center, ...points, ...points.map((p) => mirrorAround(center, p))];
+  let west = Infinity, south = Infinity, east = -Infinity, north = -Infinity;
+  for (const [lon, lat] of all) {
+    west = Math.min(west, lon); east = Math.max(east, lon);
+    south = Math.min(south, lat); north = Math.max(north, lat);
+  }
+  return [[west, south], [east, north]];
+}

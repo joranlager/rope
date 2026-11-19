@@ -5,9 +5,48 @@
 
 import { haversineM } from './geo.js';
 
-export const TRACE_OPTIONS = [250, 500, 1000, 2000, 5000]; // metres
 export const DEFAULT_TRACE_METERS = 1000;
-export const MIN_STEP_M = 5;            // ignore GPS jitter smaller than this
+
+// ---- The trail length is chosen with two wheels: a number and a unit ----
+//   unit "m":  50, 100, ... 950      (steps of 50)
+//   unit "km": 1, 2, ... 100         (steps of 1)
+// so every length from 50 m to 100 km on that grid can be picked. The setting itself is stored
+// in metres, so it stays one plain number.
+export const UNITS = ['m', 'km'];
+export const MIN_TRACE_M = 50;
+export const MAX_TRACE_M = 100_000;
+
+const range = (from, to, step = 1) => Array.from({ length: Math.floor((to - from) / step) + 1 }, (_, i) => from + i * step);
+
+/** The numbers on the number wheel for a unit. */
+export const wheelValues = (unit) => (unit === 'km' ? range(1, 100) : range(50, 950, 50));
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+/** The closest wheel position, in this unit, to a length in metres. */
+export function wheelForMeters(meters, unit) {
+  return unit === 'km'
+    ? { unit: 'km', value: clamp(Math.round(meters / 1000), 1, 100) }
+    : { unit: 'm', value: clamp(Math.round(meters / 50) * 50, 50, 950) };
+}
+
+/** The wheel position that best shows a length: kilometres from 1 km up, metres below. */
+export const wheelFromMeters = (meters) => wheelForMeters(meters, meters >= 1000 ? 'km' : 'm');
+
+export const metersFromWheel = ({ unit, value }) => (unit === 'km' ? value * 1000 : value);
+
+/**
+ * The unit wheel was turned: keep the length as close as the new unit allows.
+ * 5 km -> m is 950 m (the most metres the wheel offers); 250 m -> km is 1 km (the least).
+ */
+export const changeUnit = (wheel, unit) => wheelForMeters(metersFromWheel(wheel), unit);
+
+/** A stored length made valid: on the wheel grid, within range. Anything else is the default. */
+export function normalizeMeters(meters) {
+  if (typeof meters !== 'number' || !Number.isFinite(meters)) return DEFAULT_TRACE_METERS;
+  return metersFromWheel(wheelFromMeters(clamp(meters, MIN_TRACE_M, MAX_TRACE_M)));
+}
+export const MIN_STEP_M = 5;            // ignore GPS jitter smaller than this (more for long trails)
 export const MAX_GAP_MS = 5 * 60 * 1000; // don't draw a line across a long silence
 
 // Trail colours: Apple's system colours. 'auto' uses the person's own colour (blue for me).
@@ -36,7 +75,7 @@ export function hexToRgba(hex, alpha) {
 export function traceSettings(t) {
   return {
     on: t?.on === true,
-    meters: TRACE_OPTIONS.includes(t?.meters) ? t.meters : DEFAULT_TRACE_METERS,
+    meters: normalizeMeters(t?.meters),
     color: colorHex(t?.color) ? t.color : AUTO_COLOR,
   };
 }
@@ -77,7 +116,9 @@ export function addPoint(trail, pt, meters) {
   if (last) {
     if (pt.ts < last.ts) return trail; // out of order
     if (pt.ts - last.ts > MAX_GAP_MS) return [pt]; // start again after a gap
-    if (haversineM(last.lat, last.lon, pt.lat, pt.lon) < MIN_STEP_M) return trail; // jitter
+    // Jitter is ignored, and a long trail needs fewer points: a 50 km trail does not need a point every 5 m.
+    const minStep = Math.max(MIN_STEP_M, meters / 1500);
+    if (haversineM(last.lat, last.lon, pt.lat, pt.lon) < minStep) return trail;
   }
   return trimToDistance([...trail, pt], meters);
 }

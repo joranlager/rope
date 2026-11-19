@@ -9,9 +9,10 @@ import {
   meArrowState, personArrowState, allState,
 } from './follow.js';
 import { personHex, contrastText } from './colors.js';
-import { buildDistanceItems, visibleMidpoint } from './distance.js';
+import { buildDistanceItems, visibleMidpoint, symmetricBounds } from './distance.js';
+import { mountWheelPicker, wheelIsBusy, resetWheelActivity } from './wheel.js';
 import {
-  TRACE_OPTIONS, TRACE_COLORS, traceSettings, addPoint, trimToDistance, toFeature, labelForMeters,
+  TRACE_COLORS, traceSettings, addPoint, trimToDistance, toFeature, labelForMeters,
   colorHex, hexToRgba,
 } from './trace.js';
 import {
@@ -54,7 +55,24 @@ function saveState() {
     localStorage.setItem(STORE_KEY, JSON.stringify(copy));
   } catch { /* storage unavailable; the session still works */ }
 }
-const setStatus = (t) => { $('#status').textContent = t; };
+// The status: a chip with a coloured dot and the words on a wide screen. On a phone it is only the
+// dot (so the top bar fits on one row), and a message that isn't "GPS live" appears as a short toast.
+let toastTimer = null;
+const isPhone = () => window.matchMedia('(max-width: 640px)').matches;
+function showToast(text) {
+  const toast = $('#toast');
+  toast.textContent = text;
+  toast.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toast.hidden = true; }, 4000);
+}
+function setStatus(text) {
+  const ok = text === 'GPS live';
+  $('#status-text').textContent = text;
+  $('#status').dataset.tone = ok ? 'ok' : /^(Starting|Create your identity)/.test(text) ? 'idle' : 'warn';
+  $('#status').title = text;
+  if (isPhone() && !ok) showToast(text);
+}
 const me = () => ({ visible: state.visible });
 const activeContacts = () => Object.values(state.contacts).filter((c) => c.status === 'active');
 
@@ -119,6 +137,11 @@ function initMap() {
   map.on('dragstart', () => setFollow(dragged(follow)));
   map.on('moveend', () => { programmaticMove = false; });
   map.on('move', placeDistanceLabels);
+  // Resizing the window (or turning the phone) keeps following whatever is being followed.
+  map.on('resize', () => { if (follow.target !== null) moveToFollowed({ force: true }); });
+  // Zooming by hand leaves "All" (its zoom is chosen for you) but keeps following me at the new zoom.
+  // (A zoom the app did not start itself is the user's: wheel, pinch, double tap or the zoom buttons.)
+  map.on('zoomstart', (e) => { if (!e.programmatic && follow.target === 'all') setFollow(followMe(follow)); });
 }
 
 function makeEl(cls, text, color) {
@@ -315,6 +338,7 @@ function placeDistanceLabels() {
 
 let follow = initialFollow();
 let programmaticMove = false;
+const APP_MOVE = { programmatic: true }; // event data on every move the app starts itself, so a zoom/drag without it is the user's
 let lastFollowed = null; // what we last moved to, so repeated identical updates don't re-animate
 
 /** Where the followed thing is right now, or null if we don't have a usable position for it. */
@@ -332,32 +356,48 @@ function sheetPadding() {
   return phone && !panel.hidden && panel.classList.contains('open') ? panel.offsetHeight : 0;
 }
 
-/** Everyone I can currently see on the map: me, and each contact with a fresh, permitted position. */
-function everyonePoints() {
+/** Where everyone else I can currently see is: each contact with a fresh, permitted position. */
+function othersPoints() {
   const pts = [];
-  if (myPos) pts.push([myPos.lon, myPos.lat]);
   for (const c of activeContacts()) {
     if (c.pos && !isStale(c.pos) && seeingThem(c)) pts.push([c.pos.lon, c.pos.lat]);
   }
   return pts;
 }
 
-/** Zoom and pan so that everyone is in view. */
+/**
+ * "All": follow ME, and zoom out just far enough that everyone else is in view. The bounds are
+ * mirrored around my position, so I stay in the middle as people and I move. It runs again on every
+ * update and when the window is resized. The user leaves it by dragging the map or zooming it.
+ */
 function fitEveryone({ force = false } = {}) {
-  const pts = everyonePoints();
-  if (!pts.length || !map) return;
-  const key = `all|${pts.map((p) => p.map((v) => v.toFixed(5)).join(',')).join(';')}`;
+  if (!map || !myPos) return;
+  const me = [myPos.lon, myPos.lat];
+  const others = othersPoints();
+  const size = map.getCanvas();
+  const key = `all|${[me, ...others].map((p) => p.map((v) => v.toFixed(5)).join(',')).join(';')}|${sheetPadding()}|${size.clientWidth}x${size.clientHeight}`;
   if (!force && key === lastFollowed) return;
   if (!force && map.isMoving() && !programmaticMove) return; // don't fight the user's gesture
   lastFollowed = key;
-  programmaticMove = true;
+
   const bottom = sheetPadding();
-  if (pts.length === 1) {
-    map.easeTo({ center: pts[0], zoom: Math.max(map.getZoom(), 15), padding: { top: 0, left: 0, right: 0, bottom }, duration: 600 });
+  const none = { top: 0, left: 0, right: 0, bottom: 0 };
+  if (!others.length) {
+    programmaticMove = true;
+    map.easeTo({ center: me, zoom: Math.max(map.getZoom(), 15), padding: { ...none, bottom }, duration: 600 }, APP_MOVE);
     return;
   }
-  const bounds = pts.reduce((b, p) => b.extend(p), new maplibregl.LngLatBounds(pts[0], pts[0]));
-  map.fitBounds(bounds, { padding: { top: 100, left: 60, right: 60, bottom: 90 + bottom }, maxZoom: 17, duration: 600 });
+  const camera = map.cameraForBounds(symmetricBounds(me, others), {
+    padding: { top: 100, left: 60, right: 60, bottom: 90 + bottom },
+    maxZoom: 17,
+  });
+  if (!camera) return;
+  // Already there? Then don't start another animation for a sub-pixel change.
+  const here = map.project(map.getCenter());
+  const there = map.project(camera.center);
+  if (!force && Math.hypot(here.x - there.x, here.y - there.y) < 1 && Math.abs(map.getZoom() - camera.zoom) < 0.01) return;
+  programmaticMove = true;
+  map.easeTo({ center: camera.center, zoom: camera.zoom, padding: none, duration: 500 }, APP_MOVE);
 }
 
 /**
@@ -378,7 +418,7 @@ function moveToFollowed({ fresh = false, force = false } = {}) {
     zoom: fresh ? Math.max(map.getZoom(), 15) : map.getZoom(),
     padding: { top: 0, left: 0, right: 0, bottom: sheetPadding() },
     duration: fresh ? 800 : 500,
-  });
+  }, APP_MOVE);
 }
 
 // An arrow is a circle in the person's colour, with a glyph that stays visible on that colour
@@ -497,7 +537,7 @@ function onFix(p) {
   $('#gps-alt').textContent = altitude == null ? 'n/a' : `${Math.round(altitude)} m`;
   setStatus('GPS live');
   if (follow.target === 'me') moveToFollowed({ fresh: firstFix });
-  else if (follow.target === 'all') fitEveryone();
+  else if (follow.target === 'all') fitEveryone(); // still me-centred: my position changed
   if (state && accuracy <= 100) recordTrail('me', { lat, lon, ts: Date.now() }); // skip very rough fixes
   maybeSendPosition();
   maybeUpdateTerrain();
@@ -653,7 +693,7 @@ function renderMe() {
   const mt = traceOf('me');
   $('#trace-me').checked = mt.on;
   $('#trace-me-length').classList.toggle('off', !mt.on);
-  $('#trace-me-meters').value = String(mt.meters);
+  renderMyLengthControl(mt);
   $('#trace-me-colors').innerHTML = swatchesHtml('me', mt.color);
 }
 
@@ -677,13 +717,18 @@ function renderRequests() {
 
 function renderContacts() {
   const list = $('#contacts');
-  // Don't rebuild the list under a picker that is open: it would close on the user.
-  if (document.activeElement?.tagName === 'SELECT' && list.contains(document.activeElement)) return;
+  // Live updates must not rebuild the list under a wheel that is being turned; try again a moment later.
+  if (wheelIsBusy()) {
+    clearTimeout(renderContactsRetry);
+    renderContactsRetry = setTimeout(renderContacts, 750);
+    return;
+  }
   const all = Object.values(state.contacts).filter((c) => c.status !== 'request').sort((a, b) => label(a).localeCompare(label(b)));
   if (!all.length) {
     list.innerHTML = '<li class="muted empty">No contacts yet. Share your invite link, or paste someone else’s link above.</li>';
     return;
   }
+  const kept = takeOpenWheel(); // the open wheel is carried across the redraw, so it keeps its place and focus
   list.innerHTML = all.map((c) => {
     const id = esc(c.id);
     if (c.status === 'pending') {
@@ -705,12 +750,13 @@ function renderContacts() {
       ? `<button class="ghost danger" data-act="remove" data-id="${id}">Remove</button>`
       : '<button class="ghost" disabled title="Locked by an admin">Remove</button>';
     const t = traceSettings(c.trace);
-    const lengths = `<select data-trace-meters data-id="${id}" aria-label="Trail length for ${esc(label(c))}">${TRACE_OPTIONS
-      .map((m) => `<option value="${m}"${m === t.meters ? ' selected' : ''}>${labelForMeters(m)}</option>`).join('')}</select>`;
+    // The length shows as a button; it opens two wheels (a number and a unit) right under the row.
+    const lengths = `<button type="button" class="length-btn" data-act="wheel" data-id="${id}" aria-expanded="${wheelOpenFor === c.id}" aria-label="Trail length for ${esc(label(c))}: ${labelForMeters(t.meters)}">${labelForMeters(t.meters)}</button>`;
     // Length and colour can be set before the trail is switched on; they are dimmed while it is off.
     const traceRow = `<div class="trace-block${t.on ? '' : ' off'}">
         <div class="trace-row"><span>Trail</span>${lengths}<input type="checkbox" role="switch" data-trace-on data-id="${id}" aria-label="Show trail for ${esc(label(c))}"${t.on ? ' checked' : ''}></div>
       </div>
+      ${wheelOpenFor === c.id ? `<div class="wheel-host" data-id="${id}"></div>` : ''}
       <div class="colour-row"><span>Colour</span>
         <div class="swatches" role="group" aria-label="Colour for ${esc(label(c))}">${swatchesHtml(id, t.color)}</div>
       </div>`;
@@ -733,6 +779,61 @@ function renderContacts() {
         ${traceRow}
       </li>`;
   }).join('');
+  putBackOpenWheel(kept);
+  mountContactWheels();
+}
+
+let renderContactsRetry = null;
+let wheelOpenFor = null; // 'me', a contact id, or null: whose two wheels are open
+
+/** Takes the open wheel (and where its two columns are scrolled, and which has focus) out of the list. */
+function takeOpenWheel() {
+  if (!wheelOpenFor || wheelOpenFor === 'me') return null;
+  const root = document.querySelector(`#contacts .wheel-host[data-id="${CSS.escape(wheelOpenFor)}"] .wheel-picker`);
+  if (!root) return null;
+  const wheels = [...root.querySelectorAll('.wheel')];
+  return { root, id: wheelOpenFor, tops: wheels.map((w) => w.scrollTop), focus: wheels.indexOf(document.activeElement) };
+}
+
+/** Puts the same wheel back into the redrawn row, scrolled and focused as it was. */
+function putBackOpenWheel(kept) {
+  if (!kept) return;
+  const host = document.querySelector(`#contacts .wheel-host[data-id="${CSS.escape(kept.id)}"]`);
+  if (!host) return;
+  host.replaceChildren(kept.root);
+  const wheels = [...kept.root.querySelectorAll('.wheel')];
+  wheels.forEach((w, i) => { w.scrollTop = kept.tops[i]; });
+  if (kept.focus >= 0) wheels[kept.focus].focus({ preventScroll: true });
+}
+
+function mountContactWheels() {
+  for (const host of document.querySelectorAll('#contacts .wheel-host')) {
+    if (host.firstChild) continue; // already holds the carried-over wheel
+    const id = host.dataset.id;
+    mountWheelPicker(host, {
+      meters: traceOf(id).meters,
+      label: `Trail length for ${label(state.contacts[id])}`,
+      onChange: (meters) => { resetWheelActivity(); setTrace(id, { meters }); },
+    });
+  }
+}
+
+/** Me: the length is a button; it opens the two wheels under the row. */
+function renderMyLengthControl(mt) {
+  const open = wheelOpenFor === 'me';
+  const btn = $('#trace-me-length-btn');
+  btn.textContent = labelForMeters(mt.meters);
+  btn.setAttribute('aria-expanded', String(open));
+  const host = $('#trace-me-wheel');
+  host.hidden = !open;
+  if (!open) { host.replaceChildren(); return; }
+  if (!host.firstChild) {
+    mountWheelPicker(host, {
+      meters: mt.meters,
+      label: 'Length of my trail',
+      onChange: (meters) => { resetWheelActivity(); setTrace('me', { meters }); },
+    });
+  }
 }
 
 /** Open People and bring a person's row (with their trail settings) into view. */
@@ -764,6 +865,10 @@ async function onListClick(e) {
   try {
     switch (btn.dataset.act) {
       case 'color': setTrace(c.id, { color: btn.dataset.color }); return; // setTrace saves and redraws
+      case 'wheel': // open or close this person's trail-length wheels
+        wheelOpenFor = wheelOpenFor === c.id ? null : c.id;
+        renderContacts();
+        return;
       case 'accept': await acceptRequest(c.id); break;
       case 'decline': delete state.contacts[c.id]; break;
       case 'focus':
@@ -1019,11 +1124,12 @@ function wire() {
   $('#contacts').addEventListener('change', (e) => {
     const el = e.target;
     if (el.matches('input[data-trace-on]')) setTrace(el.dataset.id, { on: el.checked });
-    else if (el.matches('select[data-trace-meters]')) setTrace(el.dataset.id, { meters: Number(el.value) });
   });
-  $('#trace-me-meters').innerHTML = TRACE_OPTIONS.map((m) => `<option value="${m}">${labelForMeters(m)}</option>`).join('');
   $('#trace-me').addEventListener('change', (e) => setTrace('me', { on: e.target.checked }));
-  $('#trace-me-meters').addEventListener('change', (e) => setTrace('me', { meters: Number(e.target.value) }));
+  $('#trace-me-length-btn').addEventListener('click', () => {
+    wheelOpenFor = wheelOpenFor === 'me' ? null : 'me';
+    renderMyLengthControl(traceOf('me'));
+  });
   $('#trace-me-colors').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-color]');
     if (b) setTrace('me', { color: b.dataset.color });
@@ -1035,6 +1141,7 @@ function wire() {
   $('#close-panel').addEventListener('click', closePanel);
   enableSheetDrag();
   // Left arrow: follow me. Right arrow: follow the person chosen with Show. All: keep everyone in view.
+  $('#status').addEventListener('click', () => showToast($('#status-text').textContent));
   $('#follow-me').addEventListener('click', () => {
     if (!myPos) { startGps(); setStatus('Waiting for your location…'); }
     setFollow(followMe(follow), { recentre: true });
@@ -1048,6 +1155,7 @@ function wire() {
   });
   $('#menu-all').addEventListener('click', () => {
     closePanel(); // show the map
+    if (!myPos) { startGps(); setStatus('Waiting for your location…'); }
     setFollow(followAll(follow), { recentre: true });
   });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePanel(); });

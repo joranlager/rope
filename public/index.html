@@ -54,8 +54,9 @@
       <button class="menu-btn" data-tab="me" aria-pressed="false">Me</button>
       <button id="menu-all" class="menu-btn" data-action="all" aria-pressed="false" title="Show everyone on the map">All</button>
     </nav>
-    <div id="status" class="status" role="status">Starting…</div>
+    <div id="status" class="status" role="status" aria-live="polite" data-tone="idle"><i class="status-dot" aria-hidden="true"></i><span id="status-text" class="status-text">Starting…</span></div>
   </header>
+  <div id="toast" class="toast" role="status" hidden></div>
 
   <!-- Two follow arrows. Left: follow me, in my colour. Right: follow the person chosen with Show,
        in that person's colour. Filled while following, outlined otherwise. -->
@@ -167,8 +168,9 @@
         </label>
         <div id="trace-me-length" class="kv">
           <span>Trail length</span>
-          <select id="trace-me-meters" aria-label="Length of my trail"></select>
+          <button id="trace-me-length-btn" class="length-btn" type="button" aria-expanded="false" aria-label="Length of my trail"></button>
         </div>
+        <div id="trace-me-wheel" class="wheel-host" hidden></div>
       </div>
 
       <h3 class="label">Heights</h3>

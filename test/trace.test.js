@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  TRACE_OPTIONS, TRACE_COLORS, traceSettings, trailLength, trimToDistance, addPoint, toFeature,
+  TRACE_COLORS, traceSettings, wheelValues, wheelForMeters, wheelFromMeters, metersFromWheel, changeUnit, normalizeMeters, UNITS, trailLength, trimToDistance, addPoint, toFeature,
   labelForMeters, hexToRgba, colorHex, MAX_GAP_MS,
 } from '../public/trace.js';
 
@@ -15,11 +15,57 @@ test('tracing is off by default, with a 1 km trail and an automatic colour', () 
   assert.equal(traceSettings({ on: true }).on, true);
 });
 
-test('only the offered trail lengths are accepted', () => {
-  assert.deepEqual(TRACE_OPTIONS, [250, 500, 1000, 2000, 5000]);
-  assert.equal(traceSettings({ on: true, meters: 2000 }).meters, 2000);
-  assert.equal(traceSettings({ on: true, meters: 123 }).meters, 1000);
-  assert.equal(traceSettings({ on: true, meters: '500' }).meters, 1000);
+test('the trail length is a number wheel and a unit wheel', () => {
+  assert.deepEqual(UNITS, ['m', 'km']);
+  assert.deepEqual(wheelValues('m').slice(0, 3), [50, 100, 150]);
+  assert.equal(wheelValues('m').at(-1), 950);
+  assert.equal(wheelValues('m').length, 19);
+  assert.deepEqual(wheelValues('km').slice(0, 3), [1, 2, 3]);
+  assert.equal(wheelValues('km').at(-1), 100);
+  assert.equal(wheelValues('km').length, 100);
+});
+
+test('a length maps to wheel positions and back', () => {
+  assert.deepEqual(wheelFromMeters(250), { unit: 'm', value: 250 });
+  assert.deepEqual(wheelFromMeters(950), { unit: 'm', value: 950 });
+  assert.deepEqual(wheelFromMeters(1000), { unit: 'km', value: 1 });
+  assert.deepEqual(wheelFromMeters(5000), { unit: 'km', value: 5 });
+  assert.equal(metersFromWheel({ unit: 'km', value: 12 }), 12000);
+  assert.equal(metersFromWheel({ unit: 'm', value: 300 }), 300);
+  // every position on either wheel round-trips
+  for (const v of wheelValues('m')) assert.equal(metersFromWheel(wheelFromMeters(v)), v);
+  for (const v of wheelValues('km')) assert.equal(metersFromWheel(wheelFromMeters(v * 1000)), v * 1000);
+});
+
+test('turning the unit wheel keeps the length as close as the new unit allows', () => {
+  assert.deepEqual(changeUnit({ unit: 'm', value: 500 }, 'km'), { unit: 'km', value: 1 }); // at least 1 km
+  assert.deepEqual(changeUnit({ unit: 'm', value: 950 }, 'km'), { unit: 'km', value: 1 });
+  assert.deepEqual(changeUnit({ unit: 'km', value: 5 }, 'm'), { unit: 'm', value: 950 }); // at most 950 m
+  assert.deepEqual(changeUnit({ unit: 'km', value: 1 }, 'm'), { unit: 'm', value: 950 });
+  assert.deepEqual(changeUnit({ unit: 'km', value: 7 }, 'km'), { unit: 'km', value: 7 });
+});
+
+test('a stored length is made valid: on the grid, within 50 m to 100 km, else 1 km', () => {
+  assert.equal(normalizeMeters(250), 250);
+  assert.equal(normalizeMeters(2000), 2000);
+  assert.equal(normalizeMeters(100_000), 100_000);
+  assert.equal(normalizeMeters(10), 50);          // too small: the least
+  assert.equal(normalizeMeters(5_000_000), 100_000); // too large: the most
+  assert.equal(normalizeMeters(123), 100);        // snapped to the grid
+  assert.equal(normalizeMeters(1499), 1000);
+  assert.equal(normalizeMeters('500'), 1000);     // not a number: the default
+  assert.equal(normalizeMeters(NaN), 1000);
+  assert.equal(normalizeMeters(undefined), 1000);
+  assert.equal(traceSettings({ on: true, meters: 7000 }).meters, 7000);
+  assert.equal(traceSettings({ on: true, meters: wheelForMeters(0, 'm').value }).meters, 50);
+});
+
+test('long trails keep fewer points', () => {
+  // 20 m steps: kept for a 1 km trail (min step 5 m), ignored for a 50 km trail (min step ~33 m)
+  const a = { lat: 59, lon: 10, ts: 0 };
+  const b = { lat: 59.00018, lon: 10, ts: 1000 }; // ~20 m north
+  assert.equal(addPoint(addPoint([], a, 1000), b, 1000).length, 2);
+  assert.equal(addPoint(addPoint([], a, 50_000), b, 50_000).length, 1);
 });
 
 test('a trail is cut to exactly the requested distance', () => {

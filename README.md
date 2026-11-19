@@ -39,9 +39,11 @@ own ntfy server under **Me → Rendezvous server**. Everyone in a circle must us
   with **Show**, and appears once you have chosen someone. An arrow is filled while it is following and
   outlined otherwise, and its glyph switches between white and black so it stays visible on any colour.
   Drag the map to stop following; each arrow then resumes its own target.
-- **All:** the **All** entry in the top menu (next to Me) zooms the map to show you and everyone you can
-  see, keeps them all in view as they move, and shows the trails of everyone who has one switched on.
-  Drag the map to leave it.
+- **All:** the **All** entry in the top menu (next to Me) follows **you**, zoomed out just far enough that
+  everyone you can see is in view, with you kept in the middle as you and they move. It also shows the
+  trails of everyone who has one switched on. Dragging the map, or zooming it by hand, leaves All
+  (zooming leaves you following yourself at the new zoom). Resizing the window or turning the phone keeps
+  following whatever you were following.
 - **Distances:** the measure-tape button (bottom right) toggles a live view of the direct distance from
   you to each person visible on the map: a dashed line in their colour with the distance at its middle,
   updating as either of you moves. It is **off by default** and the choice is remembered. Under 1 000 m
@@ -53,12 +55,18 @@ own ntfy server under **Me → Rendezvous server**. Everyone in a circle must us
   Pick it from the palette (or leave it on Auto) in their card, or under Me for yourself. It is set
   independently of the trail switch.
 - **Trails:** each person, you included, can have a trail of their last stretch of path, fading toward
-  the oldest end. It is **off by default** and set per person: on/off, length (250 m to 5 km, default 1 km)
-  and the colour above. A trail starts recording when you switch it on, lives only in memory on your device, and is
+  the oldest end. It is **off by default** and set per person: on/off, length (default 1 km)
+  and the colour above. The **length** is chosen with two wheels, like an iOS picker: a number wheel and a
+  unit wheel (m / km). Metres go from 50 to 950 in steps of 50; kilometres from 1 to 100. Turn the unit
+  and the length stays as close as the new unit allows. Wheels also work with a click and the arrow keys.
+  A trail starts recording when you switch it on, lives only in memory on your device, and is
   removed if that person stops sharing. You can only trail people you are allowed to see.
 - **Per person:** each person's row has their own trail switch and length (dimmed while the trail is off)
   and their colour, all usable before you switch the trail on. Tap a person on the map to jump to their
   row; tap your own blue dot for your settings.
+- **Top bar:** a translucent bar that is always on one row: the **Rope** button, the menu (People, Route,
+  Me, All) and a status dot. On a phone the status words appear briefly under the bar when something needs
+  saying, and tapping the dot shows them again.
 - **Reload:** tap the **Rope** button (top left) four times quickly to reload the app. A launch splash
   shows on a normal start; after a four-tap reload a shorter "Reloading" splash shows instead.
 
@@ -105,7 +113,8 @@ public/geo.js      haversine, elevation helpers
 public/distance.js distance labels and where to place them on screen (pure, tested)
 public/follow.js   what the map is following: me, a person, or all (pure, tested)
 public/colors.js   one colour per person and a visible glyph colour (pure, tested)
-public/trace.js    trails: trimming, jitter, colours (pure, tested)
+public/trace.js    trails: trimming, jitter, colours, the wheel model (pure, tested)
+public/wheel.js    the two-wheel number + unit picker
 public/boot.js     picks the splash before first paint
 ```
 

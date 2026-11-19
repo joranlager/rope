@@ -6,8 +6,9 @@
 // Three controls set the target:
 //   bottom-left arrow  -> follow me
 //   bottom-right arrow -> follow the chosen person
-//   "All" in the menu  -> keep everyone in view
-// Dragging the map by hand frees it. Each control then resumes its own target.
+//   "All" in the menu  -> follow me, zoomed out so everyone is in view
+// Dragging the map by hand frees it. Each control then resumes its own target. Zooming by hand
+// leaves "All" (the app then follows me at that zoom).
 
 export const initialFollow = () => ({ target: 'me', person: null });
 

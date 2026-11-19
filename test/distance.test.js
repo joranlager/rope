@@ -89,3 +89,30 @@ test('a label for a line that runs off the screen stays on the screen', () => {
   const m = visibleMidpoint({ x: 50, y: 50 }, { x: 5000, y: 3000 }, rect);
   assert.ok(m.x >= 0 && m.x <= 100 && m.y >= 0 && m.y <= 100, JSON.stringify(m));
 });
+
+import { mirrorAround, symmetricBounds } from '../public/distance.js';
+
+test('mirroring a point around me puts me exactly in the middle', () => {
+  const me = [10.75, 59.91];
+  const p = [10.80, 59.95];
+  const m = mirrorAround(me, p);
+  const mid = mapMidpoint(p, m);
+  assert.ok(Math.abs(mid[0] - me[0]) < 1e-9 && Math.abs(mid[1] - me[1]) < 1e-9, JSON.stringify(mid));
+  assert.ok(m[0] < me[0] && m[1] < me[1]); // opposite side
+});
+
+test('the fit bounds contain everyone and are centred on me', () => {
+  const me = [10.75, 59.91];
+  const people = [[10.80, 59.95], [10.68, 59.88], [10.2, 62.0]]; // the last is ~230 km away
+  const [[w, s], [e, n]] = symmetricBounds(me, people);
+  for (const [lon, lat] of people) {
+    assert.ok(lon >= w && lon <= e && lat >= s && lat <= n, `${lon},${lat} outside`);
+  }
+  const centre = mapMidpoint([w, s], [e, n]); // the middle of the bounds as the map draws it
+  assert.ok(Math.abs(centre[0] - me[0]) < 1e-6, `lon ${centre[0]}`);
+  assert.ok(Math.abs(centre[1] - me[1]) < 1e-6, `lat ${centre[1]}`);
+});
+
+test('with nobody else, the bounds are just me', () => {
+  assert.deepEqual(symmetricBounds([10, 60], []), [[10, 60], [10, 60]]);
+});
