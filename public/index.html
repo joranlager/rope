@@ -52,12 +52,18 @@
       <button class="menu-btn" data-tab="people" aria-pressed="false">People<span id="req-badge" class="badge" hidden></span></button>
       <button class="menu-btn" data-tab="route" aria-pressed="false">Route</button>
       <button class="menu-btn" data-tab="me" aria-pressed="false">Me</button>
+      <button id="menu-all" class="menu-btn" data-action="all" aria-pressed="false" title="Show everyone on the map">All</button>
     </nav>
     <div id="status" class="status" role="status">Starting…</div>
   </header>
 
+  <!-- Two follow arrows. Left: follow me, in my colour. Right: follow the person chosen with Show,
+       in that person's colour. Filled while following, outlined otherwise. -->
+  <button id="follow-me" class="fab fab-arrow fab-me" aria-label="Follow me" data-state="on" aria-pressed="true" hidden>
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M21 3 3 10.5l7 2.5 2.5 7z"/></svg>
+  </button>
   <div id="follow-label" class="follow-label" role="status" hidden></div>
-  <button id="locate" class="fab" aria-label="Follow my location" data-follow="me" aria-pressed="true" hidden>
+  <button id="follow-person" class="fab fab-arrow fab-person" aria-label="Follow person" data-state="off" aria-pressed="false" hidden>
     <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M21 3 3 10.5l7 2.5 2.5 7z"/></svg>
   </button>
 
@@ -136,6 +142,12 @@
       </label>
       <p id="admin-notice" class="notice" hidden></p>
 
+      <h3 class="label">My colour</h3>
+      <div class="group pad">
+        <div id="trace-me-colors" class="swatches" role="group" aria-label="My colour"></div>
+        <p class="muted small">Used for your dot, your arrow (bottom left) and your trail. Auto is blue.</p>
+      </div>
+
       <div class="group">
         <label class="switch-row">
           <span>
@@ -147,10 +159,6 @@
         <div id="trace-me-length" class="kv">
           <span>Trail length</span>
           <select id="trace-me-meters" aria-label="Length of my trail"></select>
-        </div>
-        <div id="trace-me-color-row" class="kv">
-          <span>Trail colour</span>
-          <div id="trace-me-colors" class="swatches" role="group" aria-label="Trail colour"></div>
         </div>
       </div>
 

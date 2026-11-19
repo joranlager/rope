@@ -34,15 +34,24 @@ own ntfy server under **Me → Rendezvous server**. Everyone in a circle must us
 
 ## Following, trails and reload
 
-- **Following:** the map opens following your own position. **Show** on a person follows them. Drag the
-  map to stop. The arrow button (bottom right) resumes: after a drag it picks up what you were following,
-  and while following someone it returns to you. The arrow is filled while following you.
+- **Following:** the map opens following your own position. Two arrows sit at the bottom: the **left**
+  one (your colour) follows you; the **right** one (the colour of the person) follows the person you chose
+  with **Show**, and appears once you have chosen someone. An arrow is filled while it is following and
+  outlined otherwise, and its glyph switches between white and black so it stays visible on any colour.
+  Drag the map to stop following; each arrow then resumes its own target.
+- **All:** the **All** entry in the top menu (next to Me) zooms the map to show you and everyone you can
+  see, keeps them all in view as they move, and shows the trails of everyone who has one switched on.
+  Drag the map to leave it.
+- **Scale:** a small scale line at the bottom left adapts as you zoom in and out.
+- **Colour:** each person, you included, has one colour, used for their map marker, avatar, arrow and trail.
+  Pick it from the palette (or leave it on Auto) in their card, or under Me for yourself. It is set
+  independently of the trail switch.
 - **Trails:** each person, you included, can have a trail of their last stretch of path, fading toward
   the oldest end. It is **off by default** and set per person: on/off, length (250 m to 5 km, default 1 km)
-  and colour. A trail starts recording when you switch it on, lives only in memory on your device, and is
+  and the colour above. A trail starts recording when you switch it on, lives only in memory on your device, and is
   removed if that person stops sharing. You can only trail people you are allowed to see.
-- **Per person:** each person's row has their own trail switch, length and colour, always visible (dimmed
-  while the trail is off, and usable before you switch it on). Tap a person on the map to jump to their
+- **Per person:** each person's row has their own trail switch and length (dimmed while the trail is off)
+  and their colour, all usable before you switch the trail on. Tap a person on the map to jump to their
   row; tap your own blue dot for your settings.
 - **Reload:** tap the **Rope** button (top left) four times quickly to reload the app. A launch splash
   shows on a normal start; after a four-tap reload a shorter "Reloading" splash shows instead.
@@ -87,7 +96,8 @@ public/crypto.js   keys, cards, ECDH/HKDF, AES-GCM, signatures
 public/net.js      ntfy publish/subscribe
 public/social.js   pure visibility and admin rules (unit tested)
 public/geo.js      haversine, elevation helpers
-public/follow.js   what the map is following (pure, tested)
+public/follow.js   what the map is following: me, a person, or all (pure, tested)
+public/colors.js   one colour per person and a visible glyph colour (pure, tested)
 public/trace.js    trails: trimming, jitter, colours (pure, tested)
 public/boot.js     picks the splash before first paint
 ```

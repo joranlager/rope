@@ -1,39 +1,35 @@
-// Which thing the map is following. Pure, so it is unit tested.
+// What the map is following. Pure, so it is unit tested.
 //
-//   target: 'me' | <contact id> | null   (null = free: the user has dragged the map away)
-//   last:   what to resume when the arrow is tapped after a drag
+//   target: 'me' | 'all' | <contact id> | null   (null = free: the user dragged the map away)
+//   person: the contact chosen with "Show", or null. The bottom-right arrow follows this person.
 //
-// The app opens following the user's own position. "Show" on a person follows that
-// person. Dragging the map stops following. The arrow button resumes it.
+// Three controls set the target:
+//   bottom-left arrow  -> follow me
+//   bottom-right arrow -> follow the chosen person
+//   "All" in the menu  -> keep everyone in view
+// Dragging the map by hand frees it. Each control then resumes its own target.
 
-export const initialFollow = () => ({ target: 'me', last: 'me' });
+export const initialFollow = () => ({ target: 'me', person: null });
 
-export const followMe = () => ({ target: 'me', last: 'me' });
+export const followMe = (s) => ({ ...s, target: 'me' });
 
-export const followPerson = (_s, id) => ({ target: id, last: id });
+/** "Show" on a person: follow them, and make them the person the right-hand arrow follows. */
+export const followPerson = (s, id) => ({ ...s, target: id, person: id });
 
-/** The user dragged the map: stop following, but remember what to resume. */
-export const dragged = (s) => (s.target === null ? s : { target: null, last: s.target });
+export const followAll = (s) => ({ ...s, target: 'all' });
 
-/**
- * The arrow button:
- *   after a drag        -> resume what was being followed
- *   following a person  -> go back to following me
- *   already following me -> unchanged (the caller can re-centre)
- */
-export function arrowPressed(s) {
-  if (s.target === null) return { target: s.last, last: s.last };
-  if (s.target !== 'me') return followMe();
-  return s;
-}
+/** The user dragged the map: stop following. */
+export const dragged = (s) => (s.target === null ? s : { ...s, target: null });
+
+/** The right-hand arrow: follow the chosen person again (nothing if none was chosen). */
+export const pressPersonArrow = (s) => (s.person ? followPerson(s, s.person) : s);
 
 /** A contact went away: never keep following someone who is gone. */
 export function contactRemoved(s, id) {
-  return {
-    target: s.target === id ? 'me' : s.target,
-    last: s.last === id ? 'me' : s.last,
-  };
+  return { target: s.target === id ? 'me' : s.target, person: s.person === id ? null : s.person };
 }
 
-/** For the arrow's look: filled when following me, outlined otherwise. */
-export const arrowState = (s) => (s.target === 'me' ? 'me' : s.target === null ? 'off' : 'person');
+// For the arrows' look: "on" = following that target (filled arrow), "off" = outlined.
+export const meArrowState = (s) => (s.target === 'me' ? 'on' : 'off');
+export const personArrowState = (s) => (!s.person ? 'none' : s.target === s.person ? 'on' : 'off');
+export const allState = (s) => (s.target === 'all' ? 'on' : 'off');

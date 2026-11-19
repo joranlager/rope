@@ -5,8 +5,10 @@ import {
 } from './crypto.js';
 import { Relay, DEFAULT_RELAY } from './net.js';
 import {
-  initialFollow, followPerson, dragged, arrowPressed, contactRemoved, arrowState,
+  initialFollow, followMe, followPerson, followAll, dragged, pressPersonArrow, contactRemoved,
+  meArrowState, personArrowState, allState,
 } from './follow.js';
+import { personHex, contrastText } from './colors.js';
 import {
   TRACE_OPTIONS, TRACE_COLORS, traceSettings, addPoint, trimToDistance, toFeature, labelForMeters,
   colorHex, hexToRgba,
@@ -75,7 +77,9 @@ function initMap() {
     center: [10.75, 59.91], zoom: 11,
     attributionControl: { compact: true },
   });
-  map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-left');
+  map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-left');
+  // A small scale line that adapts as you zoom in and out.
+  map.addControl(new maplibregl.ScaleControl({ maxWidth: 110, unit: 'metric' }), 'bottom-left');
 
   // Put the first map error on screen with the build id, so a blank map can be diagnosed from a phone.
   let mapErrorShown = false;
@@ -114,11 +118,6 @@ function makeEl(cls, text, color) {
   if (color) el.style.background = color;
   return el;
 }
-function colorFor(id) {
-  let h = 0;
-  for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  return `hsl(${h % 360} 65% 45%)`;
-}
 const initials = (n) => n.split(/\s+/).filter(Boolean).slice(0, 2).map((p) => p[0].toUpperCase()).join('') || '?';
 const label = (c) => c.nick || c.name;
 
@@ -131,15 +130,12 @@ let mapReady = false;
 const trails = new Map(); // 'me' or contact id -> [{ lat, lon, ts }]
 
 const traceOf = (id) => traceSettings(id === 'me' ? state?.myTrace : state?.contacts[id]?.trace);
-const hueOf = (id) => { let h = 0; for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return h % 360; };
 const appliedColor = new Map(); // id -> colour setting currently on the map layer
 
-// The chosen colour, or "auto": the person's own colour (blue for me).
-function traceColor(id, a) {
-  const hex = colorHex(traceOf(id).color);
-  if (hex) return hexToRgba(hex, a);
-  return id === 'me' ? hexToRgba('#007aff', a) : `hsla(${hueOf(id)}, 65%, 45%, ${a})`;
-}
+// One colour per person: the one they were given, or their automatic colour (blue for me).
+// It is used for their marker, avatar, arrow and trail.
+const colorOf = (id) => personHex(id, traceOf(id).color);
+const traceColor = (id, a) => hexToRgba(colorOf(id), a);
 
 // line-progress runs from the oldest end (0) to the newest (1): transparent to solid.
 const traceGradient = (id) => ['interpolate', ['linear'], ['line-progress'],
@@ -226,12 +222,15 @@ function setTrace(id, patch) {
 }
 
 // ---------- following ----------
-// The map opens following my own position. "Show" on a person follows them instead.
-// Dragging the map stops following; the arrow button resumes it.
+// The map opens following my own position. Three controls change that:
+//   the bottom-left arrow (my colour) follows me,
+//   the bottom-right arrow (the person's colour) follows the person chosen with "Show",
+//   "All" in the top menu keeps everyone in view.
+// Dragging the map stops following; each control then resumes its own target.
 
 let follow = initialFollow();
 let programmaticMove = false;
-let lastFollowed = null; // the point we last centred on, so repeated identical updates don't re-animate
+let lastFollowed = null; // what we last moved to, so repeated identical updates don't re-animate
 
 /** Where the followed thing is right now, or null if we don't have a usable position for it. */
 function followedPoint() {
@@ -248,11 +247,40 @@ function sheetPadding() {
   return phone && !panel.hidden && panel.classList.contains('open') ? panel.offsetHeight : 0;
 }
 
+/** Everyone I can currently see on the map: me, and each contact with a fresh, permitted position. */
+function everyonePoints() {
+  const pts = [];
+  if (myPos) pts.push([myPos.lon, myPos.lat]);
+  for (const c of activeContacts()) {
+    if (c.pos && !isStale(c.pos) && seeingThem(c)) pts.push([c.pos.lon, c.pos.lat]);
+  }
+  return pts;
+}
+
+/** Zoom and pan so that everyone is in view. */
+function fitEveryone({ force = false } = {}) {
+  const pts = everyonePoints();
+  if (!pts.length || !map) return;
+  const key = `all|${pts.map((p) => p.map((v) => v.toFixed(5)).join(',')).join(';')}`;
+  if (!force && key === lastFollowed) return;
+  if (!force && map.isMoving() && !programmaticMove) return; // don't fight the user's gesture
+  lastFollowed = key;
+  programmaticMove = true;
+  const bottom = sheetPadding();
+  if (pts.length === 1) {
+    map.easeTo({ center: pts[0], zoom: Math.max(map.getZoom(), 15), padding: { top: 0, left: 0, right: 0, bottom }, duration: 600 });
+    return;
+  }
+  const bounds = pts.reduce((b, p) => b.extend(p), new maplibregl.LngLatBounds(pts[0], pts[0]));
+  map.fitBounds(bounds, { padding: { top: 100, left: 60, right: 60, bottom: 90 + bottom }, maxZoom: 17, duration: 600 });
+}
+
 /**
  * fresh: starting to follow, so zoom in to a useful level.
- * force: re-centre even if the point hasn't changed (e.g. the sheet opened or closed).
+ * force: re-centre even if nothing has changed (e.g. the sheet opened or closed).
  */
 function moveToFollowed({ fresh = false, force = false } = {}) {
+  if (follow.target === 'all') return fitEveryone({ force: fresh || force });
   const pt = followedPoint();
   if (!pt || !map) return;
   const key = `${follow.target}|${pt.lat},${pt.lon}`;
@@ -268,19 +296,34 @@ function moveToFollowed({ fresh = false, force = false } = {}) {
   });
 }
 
+// An arrow is a circle in the person's colour, with a glyph that stays visible on that colour
+// (white or black). Filled arrow = following them; outlined = not following.
+function paintArrow(btn, hex, state) {
+  btn.style.setProperty('--arrow-bg', hex);
+  btn.style.setProperty('--arrow-fg', contrastText(hex));
+  btn.dataset.state = state;
+  btn.setAttribute('aria-pressed', String(state === 'on'));
+}
+
 function renderFollowUi() {
-  const st = arrowState(follow);
-  const btn = $('#locate');
-  btn.dataset.follow = st; // 'me' = filled arrow, otherwise outlined
-  btn.setAttribute('aria-pressed', String(st !== 'off'));
+  paintArrow($('#follow-me'), colorOf('me'), meArrowState(follow));
+  if (myMarker) myMarker.getElement().style.setProperty('--me', colorOf('me'));
+
+  const person = follow.person && state?.contacts[follow.person];
+  const pbtn = $('#follow-person');
   const lab = $('#follow-label');
-  if (st === 'person' && state?.contacts[follow.target]) {
-    const c = state.contacts[follow.target];
-    lab.hidden = false;
-    lab.textContent = followedPoint() ? `Following ${label(c)}` : `Waiting for ${label(c)}…`;
-  } else {
-    lab.hidden = true;
+  const have = Boolean(person && person.status === 'active');
+  pbtn.hidden = !have || $('#menu').hidden;
+  if (have) {
+    paintArrow(pbtn, colorOf(person.id), personArrowState(follow));
+    pbtn.setAttribute('aria-label', `Follow ${label(person)}`);
+    pbtn.title = `Follow ${label(person)}`;
   }
+  const followingPerson = have && follow.target === person.id;
+  lab.hidden = !followingPerson;
+  if (followingPerson) lab.textContent = followedPoint() ? `Following ${label(person)}` : `Waiting for ${label(person)}…`;
+
+  $('#menu-all').setAttribute('aria-pressed', String(allState(follow) === 'on'));
 }
 
 function setFollow(next, { recentre = false } = {}) {
@@ -299,11 +342,15 @@ function renderMarkers() {
     const m = markers.get(c.id);
     if (m) m.setLngLat(ll);
     else {
-      const el = makeEl('person', initials(label(c)), colorFor(c.id));
+      const el = makeEl('person', initials(label(c)));
       el.title = label(c);
       el.addEventListener('click', (e) => { e.stopPropagation(); focusPerson(c.id); });
       markers.set(c.id, new maplibregl.Marker({ element: el }).setLngLat(ll).addTo(map));
     }
+    const hex = colorOf(c.id); // follows the person's colour setting
+    const markerEl = markers.get(c.id).getElement();
+    markerEl.style.background = hex;
+    markerEl.style.color = contrastText(hex);
   }
   for (const [id, m] of markers) if (!seen.has(id)) { m.remove(); markers.delete(id); }
   if (follow.target !== null && follow.target !== 'me') { moveToFollowed(); renderFollowUi(); }
@@ -355,6 +402,7 @@ function onFix(p) {
   myPos = { lat, lon, acc: accuracy };
   if (!myMarker) {
     const dot = makeEl('me-dot', '');
+    dot.style.setProperty('--me', colorOf('me'));
     dot.addEventListener('click', (e) => { e.stopPropagation(); openPanel('me'); });
     myMarker = new maplibregl.Marker({ element: dot }).setLngLat([lon, lat]).addTo(map);
   }
@@ -363,6 +411,7 @@ function onFix(p) {
   $('#gps-alt').textContent = altitude == null ? 'n/a' : `${Math.round(altitude)} m`;
   setStatus('GPS live');
   if (follow.target === 'me') moveToFollowed({ fresh: firstFix });
+  else if (follow.target === 'all') fitEveryone();
   if (state && accuracy <= 100) recordTrail('me', { lat, lon, ts: Date.now() }); // skip very rough fixes
   maybeSendPosition();
   maybeUpdateTerrain();
@@ -517,7 +566,6 @@ function renderMe() {
   const mt = traceOf('me');
   $('#trace-me').checked = mt.on;
   $('#trace-me-length').classList.toggle('off', !mt.on);
-  $('#trace-me-color-row').classList.toggle('off', !mt.on);
   $('#trace-me-meters').value = String(mt.meters);
   $('#trace-me-colors').innerHTML = swatchesHtml('me', mt.color);
 }
@@ -552,7 +600,7 @@ function renderContacts() {
   list.innerHTML = all.map((c) => {
     const id = esc(c.id);
     if (c.status === 'pending') {
-      return `<li class="contact"><div class="contact-head"><div class="avatar" style="background:${colorFor(c.id)}">${esc(initials(c.name))}</div>
+      return `<li class="contact"><div class="contact-head"><div class="avatar" style="background:${colorOf(c.id)};color:${contrastText(colorOf(c.id))}">${esc(initials(c.name))}</div>
         <div class="who"><div class="name">${esc(c.name)}</div><div class="muted small">Waiting for them to accept</div></div></div>
         <div class="contact-actions"><button class="ghost danger" data-act="remove" data-id="${id}">Cancel</button></div></li>`;
     }
@@ -575,12 +623,14 @@ function renderContacts() {
     // Length and colour can be set before the trail is switched on; they are dimmed while it is off.
     const traceRow = `<div class="trace-block${t.on ? '' : ' off'}">
         <div class="trace-row"><span>Trail</span>${lengths}<input type="checkbox" role="switch" data-trace-on data-id="${id}" aria-label="Show trail for ${esc(label(c))}"${t.on ? ' checked' : ''}></div>
-        <div class="swatches" role="group" aria-label="Trail colour for ${esc(label(c))}">${swatchesHtml(id, t.color)}</div>
+      </div>
+      <div class="colour-row"><span>Colour</span>
+        <div class="swatches" role="group" aria-label="Colour for ${esc(label(c))}">${swatchesHtml(id, t.color)}</div>
       </div>`;
     return `
       <li class="contact" data-contact="${id}">
         <div class="contact-head">
-          <div class="avatar" style="background:${colorFor(c.id)}">${esc(initials(label(c)))}</div>
+          <div class="avatar" style="background:${colorOf(c.id)};color:${contrastText(colorOf(c.id))}">${esc(initials(label(c)))}</div>
           <div class="who">
             <div class="name">${esc(c.nick || c.name)}${c.nick ? ` <small class="muted">(${esc(c.name)})</small>` : ''}</div>
             <div class="muted small">${esc(status)} · they ${theyCanSeeMe(me(), c) ? 'can' : 'cannot'} see you</div>
@@ -616,6 +666,7 @@ function renderAll() {
   renderContacts();
   renderMarkers();
   renderTraces();
+  renderFollowUi(); // arrows, my dot and the person label follow the colour settings
 }
 
 async function onListClick(e) {
@@ -755,7 +806,7 @@ function openPanel(name) {
   panel.hidden = false;
   $('#panel-title').textContent = PANEL_TITLES[name];
   for (const t of Object.keys(PANEL_TITLES)) $(`#tab-${t}`).hidden = t !== name;
-  document.querySelectorAll('.menu-btn').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.tab === name)));
+  document.querySelectorAll('.menu-btn[data-tab]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.tab === name)));
   panel.style.transform = '';
   requestAnimationFrame(() => requestAnimationFrame(() => panel.classList.add('open'))); // let it start off-screen, then slide in
   // Once it has slid in, keep the followed point in the part of the map that is still visible.
@@ -767,7 +818,7 @@ function closePanel() {
   const panel = $('#panel');
   panel.style.transform = '';
   panel.classList.remove('open');
-  document.querySelectorAll('.menu-btn').forEach((b) => b.setAttribute('aria-pressed', 'false'));
+  document.querySelectorAll('.menu-btn[data-tab]').forEach((b) => b.setAttribute('aria-pressed', 'false'));
   clearTimeout(closeTimer);
   closeTimer = setTimeout(() => { if (openTab === null) panel.hidden = true; }, reducedMotion() ? 0 : 450);
   if (follow.target !== null) moveToFollowed({ force: true }); // sheet is leaving: use the whole map again
@@ -810,7 +861,7 @@ const inviteLink = () => `${location.origin}${location.pathname}#c=${encodeCard(
 async function startApp() {
   $('#auth').hidden = true;
   $('#menu').hidden = false; // the map stays in view; panels open from the top menu
-  $('#locate').hidden = false;
+  $('#follow-me').hidden = false;
   renderFollowUi();
   startGps(); // first, so a failure further down can't leave location unasked
   keys = await loadKeys(state.identity);
@@ -891,14 +942,18 @@ function wire() {
 
   $('#contacts').addEventListener('click', onListClick);
   $('#requests').addEventListener('click', onListClick);
-  document.querySelectorAll('.menu-btn').forEach((b) => b.addEventListener('click', () => togglePanel(b.dataset.tab)));
+  document.querySelectorAll('.menu-btn[data-tab]').forEach((b) => b.addEventListener('click', () => togglePanel(b.dataset.tab)));
   $('#close-panel').addEventListener('click', closePanel);
   enableSheetDrag();
-  // The arrow: after a drag it resumes following; while following a person it returns to me.
-  $('#locate').addEventListener('click', () => {
-    const next = arrowPressed(follow);
-    if (next.target === 'me' && !myPos) { startGps(); setStatus('Waiting for your location…'); }
-    setFollow(next, { recentre: true });
+  // Left arrow: follow me. Right arrow: follow the person chosen with Show. All: keep everyone in view.
+  $('#follow-me').addEventListener('click', () => {
+    if (!myPos) { startGps(); setStatus('Waiting for your location…'); }
+    setFollow(followMe(follow), { recentre: true });
+  });
+  $('#follow-person').addEventListener('click', () => setFollow(pressPersonArrow(follow), { recentre: true }));
+  $('#menu-all').addEventListener('click', () => {
+    closePanel(); // show the map
+    setFollow(followAll(follow), { recentre: true });
   });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePanel(); });
 
