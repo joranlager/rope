@@ -203,3 +203,15 @@ button.toggle.active { background: var(--accent); color: #fff; border-color: tra
 .request { display: grid; gap: 8px; border-color: var(--accent); }
 .requests { margin-bottom: 12px; }
 .tabpanel .row button.primary { flex: 1; }
+
+/* Location permission / error banner */
+.banner {
+  position: fixed; left: 16px; right: 16px; top: 64px; z-index: 5;
+  display: flex; gap: 12px; align-items: center; justify-content: space-between;
+  padding: 10px 12px; border-radius: var(--radius);
+  background: var(--surface); backdrop-filter: blur(14px);
+  border: 1px solid var(--border); box-shadow: var(--shadow);
+  font-size: 13px;
+}
+.banner button { flex: none; }
+@media (min-width: 641px) { .banner { right: auto; max-width: 420px; } }

@@ -116,13 +116,45 @@ function renderMarkers() {
 
 // ---------- GPS and heights ----------
 
+let gpsWatch = null;
+
+const GPS_HELP = {
+  1: 'Location is blocked for this page. On iPhone: Settings → Privacy & Security → Location Services → Safari Websites → While Using the App. Then tap Enable location.',
+  2: 'Your position is unavailable. Check that Location Services is on, then tap Enable location.',
+  3: 'Still waiting for a GPS fix. Try moving near a window or outdoors.',
+};
+
+function showGpsBanner(text) {
+  $('#gps-msg').textContent = text;
+  $('#gps-banner').hidden = false;
+}
+
+function stopGps() {
+  if (gpsWatch !== null) navigator.geolocation.clearWatch(gpsWatch);
+  gpsWatch = null;
+}
+
+// Safe to call repeatedly. Also called from a button tap, which iOS needs for its permission prompt.
 function startGps() {
-  if (!('geolocation' in navigator)) return setStatus('No GPS support in this browser');
-  navigator.geolocation.watchPosition(onFix, (err) => setStatus(`GPS: ${err.message}`),
-    { enableHighAccuracy: true, maximumAge: 3000, timeout: 20000 });
+  if (gpsWatch !== null) return;
+  if (!('geolocation' in navigator)) return showGpsBanner('This browser has no location support.');
+  showGpsBanner('Waiting for location permission…');
+  try {
+    gpsWatch = navigator.geolocation.watchPosition(onFix, onGpsError,
+      { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 });
+  } catch (err) {
+    showGpsBanner(`Could not start location: ${err.message}`);
+  }
+}
+
+function onGpsError(err) {
+  setStatus('GPS: no fix');
+  showGpsBanner(GPS_HELP[err.code] ?? err.message);
+  if (err.code === 1) stopGps(); // denied: stop retrying until the user taps Enable location
 }
 
 function onFix(p) {
+  $('#gps-banner').hidden = true;
   const { latitude: lat, longitude: lon, accuracy, altitude } = p.coords;
   myPos = { lat, lon, acc: accuracy };
   if (!myMarker) myMarker = new maplibregl.Marker({ element: makeEl('me-dot', '') }).setLngLat([lon, lat]).addTo(map);
@@ -477,10 +509,11 @@ function selectTab(name) {
 const inviteLink = () => `${location.origin}${location.pathname}#c=${encodeCard(cardOf(state.identity))}`;
 
 async function startApp() {
-  keys = await loadKeys(state.identity);
-  relay = new Relay(state.relay || DEFAULT_RELAY);
   $('#auth').hidden = true;
   $('#panel').hidden = false;
+  startGps(); // first, so a failure further down can't leave location unasked
+  keys = await loadKeys(state.identity);
+  relay = new Relay(state.relay || DEFAULT_RELAY);
   relay.subscribe(await inboxTopic(state.identity.ecdhPub), onInboxMessage, '12h');
   for (const c of activeContacts()) await openChannel(c);
   for (const c of activeContacts()) if (c.adminTouched) sendAdminState(c);
@@ -491,7 +524,6 @@ async function startApp() {
     }
   }
   renderAll();
-  startGps();
   setInterval(() => { renderContacts(); renderMarkers(); }, 15_000);
   consumeInviteFromUrl();
 }
@@ -539,6 +571,8 @@ function wire() {
     try { await navigator.clipboard.writeText(inviteLink()); setStatus('Invite link copied'); }
     catch { prompt('Copy your invite link:', inviteLink()); }
   });
+
+  $('#gps-retry').addEventListener('click', () => { stopGps(); startGps(); });
 
   $('#contacts').addEventListener('click', onListClick);
   $('#requests').addEventListener('click', onListClick);
