@@ -62,6 +62,15 @@
   <button id="follow-me" class="fab fab-arrow fab-me" aria-label="Follow me" data-state="on" aria-pressed="true" hidden>
     <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M21 3 3 10.5l7 2.5 2.5 7z"/></svg>
   </button>
+  <!-- Measure tape: toggles live distances from me to each person on the map. Off by default. -->
+  <button id="measure" class="fab fab-tool" type="button" aria-label="Show distances to people" aria-pressed="false" hidden>
+    <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="2.5" y="5.5" width="13" height="12.5" rx="3.2"/>
+      <circle cx="9" cy="11.75" r="2.3"/>
+      <path d="M15.5 14.5H21.5v3.5H15.5"/>
+      <path d="M18 14.5v1.7M20 14.5v1.2"/>
+    </svg>
+  </button>
   <div id="follow-label" class="follow-label" role="status" hidden></div>
   <button id="follow-person" class="fab fab-arrow fab-person" aria-label="Follow person" data-state="off" aria-pressed="false" hidden>
     <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M21 3 3 10.5l7 2.5 2.5 7z"/></svg>

@@ -454,3 +454,15 @@ html[data-boot="reload"] .splash-reload { display: grid; }
 .colour-row { margin-top: 10px; font-size: 15px; color: var(--label-2); }
 .colour-row > span { display: block; margin-bottom: 6px; }
 .colour-row .swatches { margin-top: 0; }
+
+/* ---------- Measure tape and distance labels ---------- */
+.fab-tool { bottom: calc(52px + 44px + 14px + env(safe-area-inset-bottom)); }
+.fab-tool[aria-pressed="true"] { background: var(--blue); color: #fff; border-color: transparent; }
+.dist-label {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px 3px 7px; border-radius: 999px;
+  background: var(--material); border: 0.5px solid var(--material-edge); box-shadow: var(--shadow-small);
+  -webkit-backdrop-filter: saturate(180%) blur(16px); backdrop-filter: saturate(180%) blur(16px);
+  font: 600 12px var(--font); letter-spacing: 0; color: var(--label); white-space: nowrap;
+  font-variant-numeric: tabular-nums; pointer-events: none; /* taps and drags go to the map */
+}
+.dist-label i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }

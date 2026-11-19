@@ -9,6 +9,7 @@ import {
   meArrowState, personArrowState, allState,
 } from './follow.js';
 import { personHex, contrastText } from './colors.js';
+import { buildDistanceItems, visibleMidpoint } from './distance.js';
 import {
   TRACE_OPTIONS, TRACE_COLORS, traceSettings, addPoint, trimToDistance, toFeature, labelForMeters,
   colorHex, hexToRgba,
@@ -100,7 +101,15 @@ function initMap() {
       paint: { 'line-color': '#2563eb', 'line-width': 5, 'line-opacity': 0.85 },
       layout: { 'line-cap': 'round', 'line-join': 'round' },
     });
+    // Dashed lines from me to each person, for the measure-tape view. Empty unless it is switched on.
+    map.addSource('distance-lines', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    map.addLayer({
+      id: 'distance-lines', type: 'line', source: 'distance-lines',
+      layout: { 'line-cap': 'round' },
+      paint: { 'line-color': ['get', 'color'], 'line-width': 2, 'line-opacity': 0.85, 'line-dasharray': [2, 2] },
+    }, 'route-line');
     renderTraces();
+    renderDistances();
   });
   map.on('click', (e) => {
     if (routeMode) setDestination({ lat: e.lngLat.lat, lon: e.lngLat.lng });
@@ -109,6 +118,7 @@ function initMap() {
   // Dragging the map by hand stops following. The map's own animated moves don't fire dragstart.
   map.on('dragstart', () => setFollow(dragged(follow)));
   map.on('moveend', () => { programmaticMove = false; });
+  map.on('move', placeDistanceLabels);
 }
 
 function makeEl(cls, text, color) {
@@ -219,6 +229,81 @@ function setTrace(id, patch) {
   }
   saveState();
   renderAll();
+}
+
+// ---------- distances ----------
+// The measure-tape button toggles a live view of the direct distance from me to each person
+// on the map: a dashed line in their colour with the distance at its middle. Off by default,
+// and the choice is remembered. A label is only shown for people who are visible on the map.
+
+const distLabels = new Map(); // contact id -> Marker holding the label
+let distanceItems = [];       // what is currently drawn, so labels can be re-placed as the map moves
+const EMPTY_LINES = { type: 'FeatureCollection', features: [] };
+
+function clearDistances() {
+  for (const m of distLabels.values()) m.remove();
+  distLabels.clear();
+  distanceItems = [];
+  if (mapReady) map.getSource('distance-lines')?.setData(EMPTY_LINES);
+}
+
+function renderDistances() {
+  if (!map || !state) return;
+  const on = state.showDistances === true;
+  const btn = $('#measure');
+  btn.setAttribute('aria-pressed', String(on));
+  btn.title = on ? 'Hide distances to people' : 'Show distances to people';
+  btn.setAttribute('aria-label', btn.title);
+  if (!on || !myPos) return clearDistances();
+
+  const people = [];
+  for (const c of activeContacts()) {
+    if (c.pos && !isStale(c.pos) && seeingThem(c)) people.push({ id: c.id, lat: c.pos.lat, lon: c.pos.lon, color: colorOf(c.id) });
+  }
+  const items = buildDistanceItems({ lat: myPos.lat, lon: myPos.lon }, people);
+
+  if (mapReady) {
+    map.getSource('distance-lines')?.setData({
+      type: 'FeatureCollection',
+      features: items.map((i) => ({ type: 'Feature', properties: { color: i.color }, geometry: { type: 'LineString', coordinates: i.line } })),
+    });
+  }
+  const seen = new Set();
+  for (const it of items) {
+    seen.add(it.id);
+    let marker = distLabels.get(it.id);
+    if (!marker) {
+      const el = document.createElement('div');
+      el.className = 'dist-label';
+      el.innerHTML = '<i></i><span></span>';
+      marker = new maplibregl.Marker({ element: el }).setLngLat(it.mid).addTo(map);
+      distLabels.set(it.id, marker);
+    }
+    const el = marker.getElement();
+    el.firstChild.style.background = it.color;
+    el.lastChild.textContent = it.text; // textContent: never markup
+  }
+  for (const [id, marker] of distLabels) if (!seen.has(id)) { marker.remove(); distLabels.delete(id); }
+  distanceItems = items;
+  placeDistanceLabels();
+}
+
+// A label sits in the middle of the part of its line that is on the screen, so it can be read
+// even when the person is far away and the true midpoint is off the screen. If none of the line is
+// on the screen there is nothing to label, and the label is hidden. Re-run on every map move.
+function placeDistanceLabels() {
+  if (!map || !distanceItems.length) return;
+  const canvas = map.getCanvas();
+  const area = { left: 16, right: canvas.clientWidth - 16, top: 72, bottom: canvas.clientHeight - 70 - sheetPadding() };
+  for (const it of distanceItems) {
+    const marker = distLabels.get(it.id);
+    if (!marker) continue;
+    const mid = visibleMidpoint(map.project(it.line[0]), map.project(it.line[1]), area);
+    const el = marker.getElement();
+    if (!mid) { el.style.display = 'none'; continue; }
+    el.style.display = '';
+    marker.setLngLat(map.unproject([mid.x, mid.y]));
+  }
 }
 
 // ---------- following ----------
@@ -354,6 +439,7 @@ function renderMarkers() {
   }
   for (const [id, m] of markers) if (!seen.has(id)) { m.remove(); markers.delete(id); }
   if (follow.target !== null && follow.target !== 'me') { moveToFollowed(); renderFollowUi(); }
+  renderDistances(); // people moved, appeared or changed colour
 }
 
 // ---------- GPS and heights ----------
@@ -416,6 +502,7 @@ function onFix(p) {
   maybeSendPosition();
   maybeUpdateTerrain();
   renderContacts();
+  renderDistances();
 }
 
 const elevationCache = new Map();
@@ -862,6 +949,8 @@ async function startApp() {
   $('#auth').hidden = true;
   $('#menu').hidden = false; // the map stays in view; panels open from the top menu
   $('#follow-me').hidden = false;
+  $('#measure').hidden = false;
+  renderDistances();
   renderFollowUi();
   startGps(); // first, so a failure further down can't leave location unasked
   keys = await loadKeys(state.identity);
@@ -951,6 +1040,12 @@ function wire() {
     setFollow(followMe(follow), { recentre: true });
   });
   $('#follow-person').addEventListener('click', () => setFollow(pressPersonArrow(follow), { recentre: true }));
+  $('#measure').addEventListener('click', () => {
+    state.showDistances = state.showDistances !== true; // off by default
+    saveState();
+    renderDistances();
+    if (state.showDistances && !myPos) setStatus('Waiting for your location…');
+  });
   $('#menu-all').addEventListener('click', () => {
     closePanel(); // show the map
     setFollow(followAll(follow), { recentre: true });

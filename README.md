@@ -42,6 +42,12 @@ own ntfy server under **Me → Rendezvous server**. Everyone in a circle must us
 - **All:** the **All** entry in the top menu (next to Me) zooms the map to show you and everyone you can
   see, keeps them all in view as they move, and shows the trails of everyone who has one switched on.
   Drag the map to leave it.
+- **Distances:** the measure-tape button (bottom right) toggles a live view of the direct distance from
+  you to each person visible on the map: a dashed line in their colour with the distance at its middle,
+  updating as either of you moves. It is **off by default** and the choice is remembered. Under 1 000 m
+  it reads in whole metres (`850 m`); from 1 000 m it reads in kilometres (`1.25 km`, `12.3 km`, `152 km`).
+  When a person is far away, the label sits on the part of the line that is on screen; if none of the
+  line is on screen, the label is hidden.
 - **Scale:** a small scale line at the bottom left adapts as you zoom in and out.
 - **Colour:** each person, you included, has one colour, used for their map marker, avatar, arrow and trail.
   Pick it from the palette (or leave it on Auto) in their card, or under Me for yourself. It is set
@@ -96,6 +102,7 @@ public/crypto.js   keys, cards, ECDH/HKDF, AES-GCM, signatures
 public/net.js      ntfy publish/subscribe
 public/social.js   pure visibility and admin rules (unit tested)
 public/geo.js      haversine, elevation helpers
+public/distance.js distance labels and where to place them on screen (pure, tested)
 public/follow.js   what the map is following: me, a person, or all (pure, tested)
 public/colors.js   one colour per person and a visible glyph colour (pure, tested)
 public/trace.js    trails: trimming, jitter, colours (pure, tested)
