@@ -5,46 +5,59 @@
 
 import { haversineM } from './geo.js';
 
-export const DEFAULT_TRACE_METERS = 1000;
-
 // ---- The trail length is chosen with two wheels: a number and a unit ----
-//   unit "m":  50, 100, ... 950      (steps of 50)
-//   unit "km": 1, 2, ... 100         (steps of 1)
-// so every length from 50 m to 100 km on that grid can be picked. The setting itself is stored
-// in metres, so it stays one plain number.
-export const UNITS = ['m', 'km'];
+// The unit wheel is Metres, Kilometres, Miles. A length is stored as { unit, value } exactly as the
+// wheels show it, so "3 mi" stays 3 mi (and is 4 828.032 m only when the map needs metres).
+//   Metres      50, 100, ... 950   (steps of 50)
+//   Kilometres  1, 2, ... 100
+//   Miles       1, 2, ... 60
+export const UNITS = ['m', 'km', 'mi'];
+export const UNIT_NAMES = { m: 'Metres', km: 'Kilometres', mi: 'Miles' };
+export const METERS_PER = { m: 1, km: 1000, mi: 1609.344 };
+export const DEFAULT_LENGTH = { unit: 'km', value: 1 };
 export const MIN_TRACE_M = 50;
 export const MAX_TRACE_M = 100_000;
 
+const RANGES = { m: [50, 950, 50], km: [1, 100, 1], mi: [1, 60, 1] }; // [first, last, step]
 const range = (from, to, step = 1) => Array.from({ length: Math.floor((to - from) / step) + 1 }, (_, i) => from + i * step);
-
-/** The numbers on the number wheel for a unit. */
-export const wheelValues = (unit) => (unit === 'km' ? range(1, 100) : range(50, 950, 50));
-
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
-/** The closest wheel position, in this unit, to a length in metres. */
-export function wheelForMeters(meters, unit) {
-  return unit === 'km'
-    ? { unit: 'km', value: clamp(Math.round(meters / 1000), 1, 100) }
-    : { unit: 'm', value: clamp(Math.round(meters / 50) * 50, 50, 950) };
+/** The numbers on the number wheel for a unit. */
+export const wheelValues = (unit) => range(...RANGES[unit]);
+
+/** A length in metres, as the map and the trail need it. */
+export const metersOfLength = ({ unit, value }) => value * METERS_PER[unit];
+
+/** The closest length, in this unit, to a number of metres. */
+export function lengthForMeters(meters, unit) {
+  const [first, last, step] = RANGES[unit];
+  return { unit, value: clamp(Math.round(meters / METERS_PER[unit] / step) * step, first, last) };
 }
 
-/** The wheel position that best shows a length: kilometres from 1 km up, metres below. */
-export const wheelFromMeters = (meters) => wheelForMeters(meters, meters >= 1000 ? 'km' : 'm');
-
-export const metersFromWheel = ({ unit, value }) => (unit === 'km' ? value * 1000 : value);
+/** A length that shows a number of metres well: kilometres from 1 km up, metres below. */
+export const lengthFromMeters = (meters) => lengthForMeters(meters, meters >= 1000 ? 'km' : 'm');
 
 /**
  * The unit wheel was turned: keep the length as close as the new unit allows.
- * 5 km -> m is 950 m (the most metres the wheel offers); 250 m -> km is 1 km (the least).
+ * 12 km -> Metres is 950 m (the most the wheel offers); 300 m -> Kilometres is 1 km (the least).
  */
-export const changeUnit = (wheel, unit) => wheelForMeters(metersFromWheel(wheel), unit);
+export const changeUnit = (length, unit) => lengthForMeters(metersOfLength(length), unit);
 
-/** A stored length made valid: on the wheel grid, within range. Anything else is the default. */
-export function normalizeMeters(meters) {
-  if (typeof meters !== 'number' || !Number.isFinite(meters)) return DEFAULT_TRACE_METERS;
-  return metersFromWheel(wheelFromMeters(clamp(meters, MIN_TRACE_M, MAX_TRACE_M)));
+export const isValidLength = (l) => Boolean(l) && UNITS.includes(l.unit) && wheelValues(l.unit).includes(l.value);
+
+/** "300 m", "5 km", "3 mi" */
+export const labelForLength = ({ unit, value }) => `${value} ${unit}`;
+
+/**
+ * Settings from storage made valid. A stored { unit, value } is used if it is on a wheel; an older
+ * stored length in metres is converted; anything else is the default, 1 km.
+ */
+export function normalizeLength(t) {
+  if (isValidLength(t?.length)) return { unit: t.length.unit, value: t.length.value };
+  if (typeof t?.meters === 'number' && Number.isFinite(t.meters)) {
+    return lengthFromMeters(clamp(t.meters, MIN_TRACE_M, MAX_TRACE_M));
+  }
+  return { ...DEFAULT_LENGTH };
 }
 export const MIN_STEP_M = 5;            // ignore GPS jitter smaller than this (more for long trails)
 export const MAX_GAP_MS = 5 * 60 * 1000; // don't draw a line across a long silence
@@ -73,9 +86,11 @@ export function hexToRgba(hex, alpha) {
 
 /** Normalises stored settings. Tracing is off unless explicitly switched on. */
 export function traceSettings(t) {
+  const length = normalizeLength(t);
   return {
     on: t?.on === true,
-    meters: normalizeMeters(t?.meters),
+    length,                          // what the wheels show: { unit, value }
+    meters: metersOfLength(length),  // the same length in metres
     color: colorHex(t?.color) ? t.color : AUTO_COLOR,
   };
 }
@@ -132,4 +147,5 @@ export function toFeature(trail) {
   };
 }
 
-export const labelForMeters = (m) => (m >= 1000 ? `${m / 1000} km` : `${m} m`);
+/** Kept for callers that only have metres. */
+export const labelForMeters = (m) => labelForLength(lengthFromMeters(m));

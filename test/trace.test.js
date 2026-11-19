@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  TRACE_COLORS, traceSettings, wheelValues, wheelForMeters, wheelFromMeters, metersFromWheel, changeUnit, normalizeMeters, UNITS, trailLength, trimToDistance, addPoint, toFeature,
+  TRACE_COLORS, traceSettings, wheelValues, lengthForMeters, lengthFromMeters, metersOfLength, changeUnit, normalizeLength,
+  isValidLength, labelForLength, UNITS, UNIT_NAMES, METERS_PER, trailLength, trimToDistance, addPoint, toFeature,
   labelForMeters, hexToRgba, colorHex, MAX_GAP_MS,
 } from '../public/trace.js';
 
@@ -10,54 +11,76 @@ const walkNorth = (n, step = 0.001, t0 = 0) =>
   Array.from({ length: n }, (_, i) => ({ lat: 59 + i * step, lon: 10, ts: t0 + i * 10_000 }));
 
 test('tracing is off by default, with a 1 km trail and an automatic colour', () => {
-  assert.deepEqual(traceSettings(undefined), { on: false, meters: 1000, color: 'auto' });
-  assert.deepEqual(traceSettings({}), { on: false, meters: 1000, color: 'auto' });
+  assert.deepEqual(traceSettings(undefined), { on: false, length: { unit: 'km', value: 1 }, meters: 1000, color: 'auto' });
+  assert.deepEqual(traceSettings({}), { on: false, length: { unit: 'km', value: 1 }, meters: 1000, color: 'auto' });
   assert.equal(traceSettings({ on: true }).on, true);
 });
 
-test('the trail length is a number wheel and a unit wheel', () => {
-  assert.deepEqual(UNITS, ['m', 'km']);
+test('the unit wheel is Metres, Kilometres, Miles', () => {
+  assert.deepEqual(UNITS, ['m', 'km', 'mi']);
+  assert.deepEqual(UNITS.map((u) => UNIT_NAMES[u]), ['Metres', 'Kilometres', 'Miles']);
+  assert.equal(METERS_PER.mi, 1609.344);
+});
+
+test('each unit has its own number wheel', () => {
   assert.deepEqual(wheelValues('m').slice(0, 3), [50, 100, 150]);
   assert.equal(wheelValues('m').at(-1), 950);
   assert.equal(wheelValues('m').length, 19);
   assert.deepEqual(wheelValues('km').slice(0, 3), [1, 2, 3]);
   assert.equal(wheelValues('km').at(-1), 100);
-  assert.equal(wheelValues('km').length, 100);
+  assert.deepEqual(wheelValues('mi').slice(0, 3), [1, 2, 3]);
+  assert.equal(wheelValues('mi').at(-1), 60);
+  assert.equal(wheelValues('mi').length, 60);
 });
 
-test('a length maps to wheel positions and back', () => {
-  assert.deepEqual(wheelFromMeters(250), { unit: 'm', value: 250 });
-  assert.deepEqual(wheelFromMeters(950), { unit: 'm', value: 950 });
-  assert.deepEqual(wheelFromMeters(1000), { unit: 'km', value: 1 });
-  assert.deepEqual(wheelFromMeters(5000), { unit: 'km', value: 5 });
-  assert.equal(metersFromWheel({ unit: 'km', value: 12 }), 12000);
-  assert.equal(metersFromWheel({ unit: 'm', value: 300 }), 300);
-  // every position on either wheel round-trips
-  for (const v of wheelValues('m')) assert.equal(metersFromWheel(wheelFromMeters(v)), v);
-  for (const v of wheelValues('km')) assert.equal(metersFromWheel(wheelFromMeters(v * 1000)), v * 1000);
+test('a length is stored as unit and value, and converts to metres only when needed', () => {
+  assert.equal(metersOfLength({ unit: 'm', value: 300 }), 300);
+  assert.equal(metersOfLength({ unit: 'km', value: 12 }), 12000);
+  assert.equal(metersOfLength({ unit: 'mi', value: 3 }), 4828.032);
+  assert.equal(labelForLength({ unit: 'mi', value: 3 }), '3 mi');
+  assert.equal(labelForLength({ unit: 'm', value: 300 }), '300 m');
+  assert.equal(labelForLength({ unit: 'km', value: 5 }), '5 km');
+  // 3 miles stays 3 miles through settings; it is not turned into a rounded number of km
+  assert.deepEqual(traceSettings({ length: { unit: 'mi', value: 3 } }).length, { unit: 'mi', value: 3 });
+  assert.equal(traceSettings({ length: { unit: 'mi', value: 3 } }).meters, 4828.032);
+});
+
+test('metres map to the nearest position on a wheel', () => {
+  assert.deepEqual(lengthFromMeters(250), { unit: 'm', value: 250 });
+  assert.deepEqual(lengthFromMeters(1000), { unit: 'km', value: 1 });
+  assert.deepEqual(lengthFromMeters(5000), { unit: 'km', value: 5 });
+  assert.deepEqual(lengthForMeters(4828, 'mi'), { unit: 'mi', value: 3 });
+  assert.deepEqual(lengthForMeters(10_000, 'mi'), { unit: 'mi', value: 6 });
+  for (const v of wheelValues('m')) assert.equal(metersOfLength(lengthFromMeters(v)), v);
+  for (const v of wheelValues('km')) assert.equal(metersOfLength(lengthFromMeters(v * 1000)), v * 1000);
 });
 
 test('turning the unit wheel keeps the length as close as the new unit allows', () => {
-  assert.deepEqual(changeUnit({ unit: 'm', value: 500 }, 'km'), { unit: 'km', value: 1 }); // at least 1 km
-  assert.deepEqual(changeUnit({ unit: 'm', value: 950 }, 'km'), { unit: 'km', value: 1 });
-  assert.deepEqual(changeUnit({ unit: 'km', value: 5 }, 'm'), { unit: 'm', value: 950 }); // at most 950 m
-  assert.deepEqual(changeUnit({ unit: 'km', value: 1 }, 'm'), { unit: 'm', value: 950 });
+  assert.deepEqual(changeUnit({ unit: 'km', value: 12 }, 'm'), { unit: 'm', value: 950 });   // at most 950 m
+  assert.deepEqual(changeUnit({ unit: 'm', value: 300 }, 'km'), { unit: 'km', value: 1 });   // at least 1 km
+  assert.deepEqual(changeUnit({ unit: 'km', value: 5 }, 'mi'), { unit: 'mi', value: 3 });    // 5 km ~ 3.1 mi
+  assert.deepEqual(changeUnit({ unit: 'mi', value: 10 }, 'km'), { unit: 'km', value: 16 });  // 16.09 km
+  assert.deepEqual(changeUnit({ unit: 'mi', value: 3 }, 'm'), { unit: 'm', value: 950 });
+  assert.deepEqual(changeUnit({ unit: 'm', value: 500 }, 'mi'), { unit: 'mi', value: 1 });
   assert.deepEqual(changeUnit({ unit: 'km', value: 7 }, 'km'), { unit: 'km', value: 7 });
+  assert.deepEqual(changeUnit({ unit: 'km', value: 100 }, 'mi'), { unit: 'mi', value: 60 }); // at most 60 mi
 });
 
-test('a stored length is made valid: on the grid, within 50 m to 100 km, else 1 km', () => {
-  assert.equal(normalizeMeters(250), 250);
-  assert.equal(normalizeMeters(2000), 2000);
-  assert.equal(normalizeMeters(100_000), 100_000);
-  assert.equal(normalizeMeters(10), 50);          // too small: the least
-  assert.equal(normalizeMeters(5_000_000), 100_000); // too large: the most
-  assert.equal(normalizeMeters(123), 100);        // snapped to the grid
-  assert.equal(normalizeMeters(1499), 1000);
-  assert.equal(normalizeMeters('500'), 1000);     // not a number: the default
-  assert.equal(normalizeMeters(NaN), 1000);
-  assert.equal(normalizeMeters(undefined), 1000);
+test('stored settings are made valid: a valid length is kept, an old metres value is converted, else 1 km', () => {
+  assert.ok(isValidLength({ unit: 'mi', value: 60 }));
+  assert.ok(!isValidLength({ unit: 'mi', value: 61 }));
+  assert.ok(!isValidLength({ unit: 'm', value: 120 }));   // not on the wheel
+  assert.ok(!isValidLength({ unit: 'yd', value: 5 }));
+  assert.ok(!isValidLength(null));
+  assert.deepEqual(normalizeLength({ length: { unit: 'km', value: 7 } }), { unit: 'km', value: 7 });
+  assert.deepEqual(normalizeLength({ meters: 250 }), { unit: 'm', value: 250 });      // from before miles existed
+  assert.deepEqual(normalizeLength({ meters: 2000 }), { unit: 'km', value: 2 });
+  assert.deepEqual(normalizeLength({ meters: 10 }), { unit: 'm', value: 50 });
+  assert.deepEqual(normalizeLength({ meters: 5_000_000 }), { unit: 'km', value: 100 });
+  assert.deepEqual(normalizeLength({ meters: '500' }), { unit: 'km', value: 1 });
+  assert.deepEqual(normalizeLength({ length: { unit: 'mi', value: 99 } }), { unit: 'km', value: 1 });
+  assert.deepEqual(normalizeLength(undefined), { unit: 'km', value: 1 });
   assert.equal(traceSettings({ on: true, meters: 7000 }).meters, 7000);
-  assert.equal(traceSettings({ on: true, meters: wheelForMeters(0, 'm').value }).meters, 50);
 });
 
 test('long trails keep fewer points', () => {

@@ -56,9 +56,12 @@ own ntfy server under **Me → Rendezvous server**. Everyone in a circle must us
   independently of the trail switch.
 - **Trails:** each person, you included, can have a trail of their last stretch of path, fading toward
   the oldest end. It is **off by default** and set per person: on/off, length (default 1 km)
-  and the colour above. The **length** is chosen with two wheels, like an iOS picker: a number wheel and a
-  unit wheel (m / km). Metres go from 50 to 950 in steps of 50; kilometres from 1 to 100. Turn the unit
-  and the length stays as close as the new unit allows. Wheels also work with a click and the arrow keys.
+  and the colour above. The **length** is chosen with two wheels, like an iOS picker: a number wheel and a unit wheel
+  (**Metres, Kilometres, Miles**). Metres go from 50 to 950 in steps of 50, kilometres from 1 to 100 and miles
+  from 1 to 60. A length is stored as you pick it, so 3 mi stays 3 mi. Turning the unit keeps the length as
+  close as the new unit allows. The wheels curve away from the highlighted band (rows shrink, bunch together
+  and fade), always come to rest exactly on a row, and work with touch (native momentum), a dragged mouse
+  with momentum, the mouse wheel, a click on a row, and the arrow / page / home / end keys.
   A trail starts recording when you switch it on, lives only in memory on your device, and is
   removed if that person stops sharing. You can only trail people you are allowed to see.
 - **Per person:** each person's row has their own trail switch and length (dimmed while the trail is off)

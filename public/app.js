@@ -12,7 +12,7 @@ import { personHex, contrastText } from './colors.js';
 import { buildDistanceItems, visibleMidpoint, symmetricBounds } from './distance.js';
 import { mountWheelPicker, wheelIsBusy, resetWheelActivity } from './wheel.js';
 import {
-  TRACE_COLORS, traceSettings, addPoint, trimToDistance, toFeature, labelForMeters,
+  TRACE_COLORS, traceSettings, addPoint, trimToDistance, toFeature, labelForLength, metersOfLength,
   colorHex, hexToRgba,
 } from './trace.js';
 import {
@@ -236,8 +236,11 @@ function clearTrail(id) {
 function setTrace(id, patch) {
   const before = traceOf(id);
   const next = { ...before, ...patch };
-  if (id === 'me') state.myTrace = next;
-  else if (state.contacts[id]) state.contacts[id].trace = next;
+  next.meters = metersOfLength(next.length); // the same length in metres, for the trail
+  // Store the length as { unit, value }, the way the wheels show it (3 mi stays 3 mi), not as metres.
+  const stored = { on: next.on, length: next.length, color: next.color };
+  if (id === 'me') state.myTrace = stored;
+  else if (state.contacts[id]) state.contacts[id].trace = stored;
   else return;
   if (!next.on) {
     clearTrail(id);
@@ -751,7 +754,7 @@ function renderContacts() {
       : '<button class="ghost" disabled title="Locked by an admin">Remove</button>';
     const t = traceSettings(c.trace);
     // The length shows as a button; it opens two wheels (a number and a unit) right under the row.
-    const lengths = `<button type="button" class="length-btn" data-act="wheel" data-id="${id}" aria-expanded="${wheelOpenFor === c.id}" aria-label="Trail length for ${esc(label(c))}: ${labelForMeters(t.meters)}">${labelForMeters(t.meters)}</button>`;
+    const lengths = `<button type="button" class="length-btn" data-act="wheel" data-id="${id}" aria-expanded="${wheelOpenFor === c.id}" aria-label="Trail length for ${esc(label(c))}: ${labelForLength(t.length)}">${labelForLength(t.length)}</button>`;
     // Length and colour can be set before the trail is switched on; they are dimmed while it is off.
     const traceRow = `<div class="trace-block${t.on ? '' : ' off'}">
         <div class="trace-row"><span>Trail</span>${lengths}<input type="checkbox" role="switch" data-trace-on data-id="${id}" aria-label="Show trail for ${esc(label(c))}"${t.on ? ' checked' : ''}></div>
@@ -811,9 +814,9 @@ function mountContactWheels() {
     if (host.firstChild) continue; // already holds the carried-over wheel
     const id = host.dataset.id;
     mountWheelPicker(host, {
-      meters: traceOf(id).meters,
+      length: traceOf(id).length,
       label: `Trail length for ${label(state.contacts[id])}`,
-      onChange: (meters) => { resetWheelActivity(); setTrace(id, { meters }); },
+      onChange: (length) => { resetWheelActivity(); setTrace(id, { length }); },
     });
   }
 }
@@ -822,16 +825,16 @@ function mountContactWheels() {
 function renderMyLengthControl(mt) {
   const open = wheelOpenFor === 'me';
   const btn = $('#trace-me-length-btn');
-  btn.textContent = labelForMeters(mt.meters);
+  btn.textContent = labelForLength(mt.length);
   btn.setAttribute('aria-expanded', String(open));
   const host = $('#trace-me-wheel');
   host.hidden = !open;
   if (!open) { host.replaceChildren(); return; }
   if (!host.firstChild) {
     mountWheelPicker(host, {
-      meters: mt.meters,
+      length: mt.length,
       label: 'Length of my trail',
-      onChange: (meters) => { resetWheelActivity(); setTrace('me', { meters }); },
+      onChange: (length) => { resetWheelActivity(); setTrace('me', { length }); },
     });
   }
 }

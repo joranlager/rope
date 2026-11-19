@@ -500,29 +500,39 @@ html[data-boot="reload"] .splash-reload { display: grid; }
 .wheel-host[hidden] { display: none; }
 .group > .wheel-host { margin: 0 16px 12px; }
 .wheel-picker {
-  position: relative; display: flex; justify-content: center; gap: 6px;
-  height: 176px; border-radius: 14px; background: var(--fill); overflow: hidden;
+  position: relative; display: flex; justify-content: center; align-items: stretch;
+  height: 220px;                         /* 5 rows of 44 px, as on iOS */
+  border-radius: 14px; background: var(--fill); overflow: hidden;
 }
-.wheel {
-  position: relative; z-index: 1; flex: 1; max-width: 130px; height: 100%;
-  padding: 66px 0;                    /* (176 - 44) / 2: the first and last item can reach the band */
-  overflow-y: scroll; scroll-snap-type: y mandatory; overscroll-behavior: contain;
-  scrollbar-width: none; -webkit-overflow-scrolling: touch; touch-action: pan-y; outline: none;
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 32%, #000 68%, transparent 100%);
-  mask-image: linear-gradient(to bottom, transparent 0, #000 32%, #000 68%, transparent 100%);
-}
-.wheel::-webkit-scrollbar { display: none; }
-.wheel:focus-visible { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--blue) 55%, transparent); border-radius: 10px; }
-.wheel-item {
-  height: 44px; display: grid; place-items: center; scroll-snap-align: center; scroll-snap-stop: always;
-  font-size: 22px; font-variant-numeric: tabular-nums; color: var(--label); opacity: 0.4; cursor: pointer;
-  transition: opacity 0.15s;
-}
-.wheel-item[aria-selected="true"] { opacity: 1; font-weight: 600; }
+/* One band across both wheels, like the selection highlight on iOS */
 .wheel-band {
-  position: absolute; z-index: 0; left: 8px; right: 8px; top: 66px; height: 44px; border-radius: 10px;
+  position: absolute; z-index: 0; left: 8px; right: 8px; top: 88px; height: 44px; border-radius: 10px;
   background: var(--fill-strong); pointer-events: none;
 }
+.wheel {
+  position: relative; z-index: 1; height: 100%;
+  padding: 88px 0;                       /* (220 - 44) / 2: the first and last row can reach the band */
+  overflow-y: scroll; scroll-snap-type: y mandatory; overscroll-behavior: contain;
+  scrollbar-width: none; -webkit-overflow-scrolling: touch; touch-action: pan-y; outline: none;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 22%, #000 78%, transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 22%, #000 78%, transparent 100%);
+  user-select: none; -webkit-user-select: none; cursor: grab;
+}
+.wheel.dragging { scroll-snap-type: none; cursor: grabbing; }
+.wheel::-webkit-scrollbar { display: none; }
+.wheel:focus-visible { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--blue) 55%, transparent); border-radius: 10px; }
+/* Numbers hug the right of their wheel and the unit hugs the left of its own, so they read as one
+   value, as in the iOS time picker */
+.wheel[data-kind="number"] { flex: 0 0 38%; }
+.wheel[data-kind="unit"] { flex: 0 0 46%; }
+.wheel-item {
+  height: 44px; display: flex; align-items: center; scroll-snap-align: center; scroll-snap-stop: always;
+  font-size: 22px; font-variant-numeric: tabular-nums; color: var(--label);
+}
+.wheel[data-kind="number"] .wheel-item { justify-content: flex-end; padding-right: 14px; }
+.wheel[data-kind="unit"] .wheel-item { justify-content: flex-start; padding-left: 14px; }
+.wheel-face { display: block; will-change: transform, opacity; transform-origin: center; }
+.wheel-item[aria-selected="true"] .wheel-face { font-weight: 500; }
 
 /* A short message under the bar (phones: the status words), then it goes away */
 .toast {
