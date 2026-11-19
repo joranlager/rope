@@ -576,25 +576,59 @@ async function maybeUpdateTerrain() {
 
 // ---------- messaging ----------
 
+// The relay already retries a few times, so a failure here means a real outage. Say so once
+// (not once per contact and per position), in words that match the cause.
+let relayDown = false, relayWarnedAt = 0;
+const RELAY_ERROR_TEXT = {
+  offline: 'No connection to the rendezvous server. Retrying…',
+  rate: 'The rendezvous server is busy (rate limit). Retrying…',
+  server: 'The rendezvous server refused a message',
+};
+function relayFailed(err) {
+  relayDown = true;
+  if (Date.now() - relayWarnedAt < 60_000) return;
+  relayWarnedAt = Date.now();
+  const kind = navigator.onLine === false ? 'offline' : err?.kind;
+  setStatus(RELAY_ERROR_TEXT[kind] ?? RELAY_ERROR_TEXT.offline);
+}
+function relayOk() {
+  if (!relayDown) return;
+  relayDown = false;
+  relayWarnedAt = 0;
+  setStatus(myPos ? 'GPS live' : 'Connected to the rendezvous server');
+}
+
 async function publish(topic, obj, aes) {
   try {
     await relay.publish(topic, aes ? await seal(aes, obj) : JSON.stringify(obj));
-  } catch {
-    setStatus('Can’t reach the rendezvous server'); // a plain "Failed to fetch" tells the user nothing
+    relayOk();
+    return true;
+  } catch (err) {
+    relayFailed(err);
+    return false;
   }
 }
 
 async function sendPair(c, obj) {
   const ch = channels.get(c.id);
-  if (ch) await publish(ch.topic, obj, ch.aes);
+  return ch ? publish(ch.topic, obj, ch.aes) : true;
 }
 
 function maybeSendPosition(force = false) {
   if (!myPos || (!force && Date.now() - lastSent < SEND_EVERY_MS)) return;
   lastSent = Date.now();
   for (const c of activeContacts()) {
-    if (shouldSendPosition(me(), c)) sendPair(c, { t: 'pos', ts: Date.now(), lat: myPos.lat, lon: myPos.lon, acc: myPos.acc });
+    if (!shouldSendPosition(me(), c)) continue;
+    sendPair(c, { t: 'pos', ts: Date.now(), lat: myPos.lat, lon: myPos.lon, acc: myPos.acc })
+      .then((ok) => { if (!ok) lastSent = 0; }); // send the newest fix as soon as the next one arrives
   }
+}
+
+// Coming back from a dead zone or from the background: reopen dropped streams, send where I am now.
+function onNetworkBack() {
+  if (!relay) return;
+  relay.reconnect();
+  maybeSendPosition(true);
 }
 
 async function sendAdminState(c) {
@@ -1074,6 +1108,8 @@ async function startApp() {
   }
   renderAll();
   setInterval(() => { renderContacts(); renderMarkers(); renderTraces(); }, 15_000);
+  window.addEventListener('online', onNetworkBack);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') onNetworkBack(); });
   consumeInviteFromUrl();
 }
 
