@@ -33,7 +33,7 @@ export class Relay {
     this.subs = new Map(); // topic -> { es, onMessage, since, lastId }
   }
 
-  /** Posts once, retrying network errors, timeouts, 429 and 5xx a couple of times before giving up. */
+  /** Posts once, retrying network errors, timeouts and 5xx a couple of times before giving up. A 429 is not retried. */
   async publish(topic, text) {
     let err;
     for (let attempt = 0; attempt <= this.delays.length; attempt++) {
@@ -46,8 +46,15 @@ export class Relay {
         continue;
       }
       if (res.ok) return;
-      err = new RelayError(res.status === 429 ? 'rate' : 'server', `Relay refused message (${res.status})`);
-      if (res.status !== 429 && res.status < 500) throw err; // other 4xx won't fix itself
+      if (res.status === 429) {
+        // Rate-limited: retrying soon only digs deeper. Say how long to wait, if the server told us.
+        err = new RelayError('rate', 'Relay rate limit (429)');
+        const after = Number(res.headers?.get?.('Retry-After'));
+        if (Number.isFinite(after) && after > 0) err.retryAfterMs = Math.min(after, 600) * 1000;
+        throw err;
+      }
+      err = new RelayError('server', `Relay refused message (${res.status})`);
+      if (res.status < 500) throw err; // other 4xx won't fix itself
     }
     throw err;
   }

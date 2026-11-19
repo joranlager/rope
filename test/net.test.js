@@ -29,10 +29,17 @@ test('publish gives up after the retries with kind offline', async () => {
   assert.equal(f.calls.length, 3);
 });
 
-test('publish retries 429 and 5xx, reports rate limit', async () => {
-  const f = fakeFetch([503, 429, 429]);
-  await assert.rejects(new Relay('https://r', { fetchImpl: f, delays: [0, 0] }).publish('t', 'x'), (e) => e.kind === 'rate');
-  assert.equal(f.calls.length, 3);
+test('publish retries 5xx but stops at a 429, passing on Retry-After', async () => {
+  const outcomes = [503, 429];
+  const f = async () => {
+    const st = outcomes.shift();
+    return { ok: false, status: st, headers: { get: (h) => (h === 'Retry-After' && st === 429 ? '20' : null) } };
+  };
+  let calls = 0;
+  const counted = (...a) => { calls++; return f(...a); };
+  await assert.rejects(new Relay('https://r', { fetchImpl: counted, delays: [0, 0] }).publish('t', 'x'),
+    (e) => e.kind === 'rate' && e.retryAfterMs === 20_000);
+  assert.equal(calls, 2);
 });
 
 test('publish does not retry a 4xx other than 429', async () => {

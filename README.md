@@ -31,6 +31,25 @@ own ntfy server under **Me → Rendezvous server**. Everyone in a circle must us
    It gives each contact its own AES-GCM key and its own unguessable topic.
 5. **Sharing.** Positions are encrypted and published to that contact's topic every 10 s.
    The rendezvous server only relays ciphertext.
+6. **Direct link (peer to peer).** Each pair also tries to open a direct WebRTC data channel, after
+   OneChat's serverless connect. The offer and answer are packed into compact codes (ICE ufrag and
+   password, DTLS fingerprint, UDP candidates) and sent over the encrypted pair topic; the other side
+   rebuilds the SDP from a template. A public STUN server (Google, Cloudflare) tells each phone its
+   public address, and the peer's public candidates are re-added every few seconds so both NATs keep
+   their hole open until the checks meet. The side with the lower id always offers, so the two never
+   offer at once. Because the fingerprint arrives sealed with the contact's key, only that contact can
+   complete the handshake.
+   While the direct link is open, positions go straight between the phones every 3 s and the
+   rendezvous server is not used for them (visibility and admin messages still go through it too,
+   so a phone that is offline gets them later). If the link can't open (some mobile networks block
+   direct connections and there is no TURN relay) or drops, positions fall back to the rendezvous
+   server, and the link is retried with back-off (20 s doubling to 5 min), and at once when the
+   network comes back or the app is reopened. Each contact shows **direct** or **via server**.
+7. **Rate limits.** ntfy.sh limits requests per IP address, and mobile carriers often put many
+   phones behind one address. A failed send is retried twice; a *429 Too Many Requests* is not
+   retried, and position updates over the server pause for as long as it asks (`Retry-After`).
+   Every pair message carries the sender's id, because the server echoes your own messages back
+   on the shared topic.
 
 ## Following, trails and reload
 

@@ -4,6 +4,7 @@ import {
   deriveSecret, channelFromSecret, seal, open, signObj, verifyObj,
 } from './crypto.js';
 import { Relay, DEFAULT_RELAY } from './net.js';
+import { PeerLink, SIGNAL_MAX_AGE_MS } from './p2p.js';
 import {
   initialFollow, followMe, followPerson, followAll, dragged, pressPersonArrow, contactRemoved,
   meArrowState, personArrowState, allState,
@@ -27,7 +28,8 @@ const esc = (s) =>
 const STORE_KEY = 'rope.v1';
 const ELEVATION_URL = 'https://ws.geonorge.no/hoydedata/v1/punkt';
 const ROUTING = { car: 'https://router.project-osrm.org/route/v1/driving' };
-const SEND_EVERY_MS = 10_000; // public relays rate-limit; this keeps a few contacts well inside it
+const SEND_EVERY_MS = 10_000;   // over the rendezvous server: public relays rate-limit
+const SEND_DIRECT_MS = 3_000;   // over a direct (peer-to-peer) link: no limit but the battery
 
 // ---------- local state ----------
 // state = { identity, visible, relay, contacts: { [id]: contact } }
@@ -37,8 +39,9 @@ let state = null;
 let keys = null;                 // imported private keys
 let relay = null;
 const channels = new Map();      // contact id -> { aes, topic }
+const links = new Map();         // contact id -> PeerLink (direct WebRTC channel)
+const lastSentTo = new Map();    // contact id -> when my position last went to them
 let myPos = null;
-let lastSent = 0;
 let map = null, myMarker = null, destMarker = null, routeMode = false, destination = null;
 const markers = new Map();
 let terrainFor = null, terrainAt = 0;
@@ -578,7 +581,7 @@ async function maybeUpdateTerrain() {
 
 // The relay already retries a few times, so a failure here means a real outage. Say so once
 // (not once per contact and per position), in words that match the cause.
-let relayDown = false, relayWarnedAt = 0;
+let relayDown = false, relayWarnedAt = 0, relayPausedUntil = 0;
 const RELAY_ERROR_TEXT = {
   offline: 'No connection to the rendezvous server. Retrying…',
   rate: 'The rendezvous server is busy (rate limit). Retrying…',
@@ -586,6 +589,8 @@ const RELAY_ERROR_TEXT = {
 };
 function relayFailed(err) {
   relayDown = true;
+  // Rate-limited: hold back position updates until the server says it's fine (direct links carry on).
+  if (err?.kind === 'rate') relayPausedUntil = Date.now() + (err.retryAfterMs || 30_000);
   if (Date.now() - relayWarnedAt < 60_000) return;
   relayWarnedAt = Date.now();
   const kind = navigator.onLine === false ? 'offline' : err?.kind;
@@ -609,26 +614,62 @@ async function publish(topic, obj, aes) {
   }
 }
 
+// Every pair message carries my id: the relay echoes my own messages back on the shared topic,
+// and without it they would be taken for the contact's.
+// Positions go over the direct link when it is open, else over the relay. Everything else goes over
+// the relay too (the relay keeps it a while for a phone that is offline right now).
 async function sendPair(c, obj) {
   const ch = channels.get(c.id);
-  return ch ? publish(ch.topic, obj, ch.aes) : true;
+  if (!ch) return true;
+  const msg = { ...obj, fr: state.identity.id };
+  const link = links.get(c.id);
+  if (link?.open && link.send(await seal(ch.aes, msg)) && obj.t === 'pos') return true;
+  if (obj.t === 'pos' && Date.now() < relayPausedUntil) return false;
+  return publish(ch.topic, msg, ch.aes);
 }
 
 function maybeSendPosition(force = false) {
-  if (!myPos || (!force && Date.now() - lastSent < SEND_EVERY_MS)) return;
-  lastSent = Date.now();
+  if (!myPos) return;
+  const now = Date.now();
   for (const c of activeContacts()) {
     if (!shouldSendPosition(me(), c)) continue;
-    sendPair(c, { t: 'pos', ts: Date.now(), lat: myPos.lat, lon: myPos.lon, acc: myPos.acc })
-      .then((ok) => { if (!ok) lastSent = 0; }); // send the newest fix as soon as the next one arrives
+    const every = links.get(c.id)?.open ? SEND_DIRECT_MS : SEND_EVERY_MS;
+    if (!force && now - (lastSentTo.get(c.id) ?? 0) < every) continue;
+    lastSentTo.set(c.id, now);
+    sendPair(c, { t: 'pos', ts: now, lat: myPos.lat, lon: myPos.lon, acc: myPos.acc })
+      .then((ok) => { if (!ok) lastSentTo.delete(c.id); }); // send the newest fix as soon as the next one arrives
   }
 }
 
-// Coming back from a dead zone or from the background: reopen dropped streams, send where I am now.
+// Coming back from a dead zone or from the background: reopen dropped streams and direct links,
+// and send where I am now.
 function onNetworkBack() {
   if (!relay) return;
   relay.reconnect();
+  for (const link of links.values()) link.kick();
   maybeSendPosition(true);
+}
+
+function openLink(c) {
+  if (links.has(c.id) || !globalThis.RTCPeerConnection) return;
+  const link = new PeerLink({
+    myId: state.identity.id,
+    theirId: c.id,
+    signal: (obj) => sendPair(c, { ...obj, ts: Date.now() }),
+    onMessage: (text) => onPairMessage(c.id, text),
+    onChange: (isOpen) => {
+      if (isOpen) { lastSentTo.delete(c.id); maybeSendPosition(); } // a direct link is up: send at once
+      renderContacts();
+    },
+  });
+  links.set(c.id, link);
+  link.kick();
+}
+
+function closeLink(id) {
+  links.get(id)?.close();
+  links.delete(id);
+  lastSentTo.delete(id);
 }
 
 async function sendAdminState(c) {
@@ -640,6 +681,7 @@ async function openChannel(c) {
   const ch = await channelFromSecret(c.secret);
   channels.set(c.id, ch);
   relay.subscribe(ch.topic, (text) => onPairMessage(c.id, text));
+  openLink(c);
 }
 
 async function onPairMessage(id, text) {
@@ -647,7 +689,11 @@ async function onPairMessage(id, text) {
   const ch = channels.get(id);
   if (!c || !ch) return;
   const msg = await open(ch.aes, text);
-  if (!msg) return;
+  if (!msg || msg.fr === state.identity.id) return; // my own message, echoed back by the relay
+  if (msg.t === 'rtc') {
+    if (Math.abs(Date.now() - Number(msg.ts)) <= SIGNAL_MAX_AGE_MS) links.get(id)?.onSignal(msg);
+    return;
+  }
   let adminVerified = false;
   if (msg.t === 'admin') {
     adminVerified = await verifyObj(c.s, adminPayload(msg.on, msg.ts), msg.sig);
@@ -668,6 +714,8 @@ async function activate(c) {
   saveState();
   await sendPair(c, { t: 'vis', v: state.visible });
   if (c.adminTouched) await sendAdminState(c);
+  lastSentTo.delete(c.id);
+  maybeSendPosition(); // a new contact sees me straight away, not at my next GPS fix
   renderAll();
 }
 
@@ -780,6 +828,7 @@ function renderContacts() {
     else if (visibleNow) status = 'Live';
     else if (!seeingThem(c)) status = 'Hidden by them';
     else status = c.pos ? 'Last position is old' : 'No position yet';
+    status += links.get(c.id)?.open ? ' · direct' : ' · via server';
     const lock = c.adminOverMe ? '<span class="chip lock">Admin set · locked</span>' : '';
     const adminBtn = c.adminOverMe ? '' :
       `<button class="ghost" data-act="admin" data-id="${id}" data-on="${!c.youAdminThem}">${c.youAdminThem ? 'Remove my admin' : 'Make me admin'}</button>`;
@@ -930,6 +979,7 @@ async function onListClick(e) {
         if (c.status === 'active' && !canRemoveContact(c)) return setStatus('An admin has set this. Only they can change it.');
         if (!confirm(`Remove ${c.name}?`)) return;
         if (channels.has(c.id)) { relay.unsubscribe(channels.get(c.id).topic); channels.delete(c.id); }
+        closeLink(c.id);
         delete state.contacts[c.id];
         clearTrail(c.id);
         setFollow(contactRemoved(follow, c.id)); // never keep following someone who is gone
