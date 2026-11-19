@@ -56,13 +56,6 @@ function initMap() {
     style: {
       version: 8,
       sources: {
-        topo: {
-          type: 'raster',
-          tiles: ['https://cache.kartverket.no/v1/wmts/1.0.0/topo/default/webmercator/{z}/{y}/{x}.png'],
-          tileSize: 256, maxzoom: 18,
-          attribution: '© <a href="https://www.kartverket.no/">Kartverket</a>',
-        },
-        // Fallback, used only if the Kartverket tiles keep failing.
         osm: {
           type: 'raster',
           tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
@@ -70,22 +63,16 @@ function initMap() {
           attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
         },
       },
-      layers: [
-        { id: 'osm', type: 'raster', source: 'osm', layout: { visibility: 'none' } },
-        { id: 'topo', type: 'raster', source: 'topo' },
-      ],
+      layers: [{ id: 'osm', type: 'raster', source: 'osm' }],
     },
     center: [10.75, 59.91], zoom: 11,
     attributionControl: { compact: true },
   });
   map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
 
-  let topoErrors = 0;
+  let tileErrors = 0;
   map.on('error', (e) => {
-    if (e.sourceId !== 'topo' || ++topoErrors !== 3) return;
-    map.setLayoutProperty('osm', 'visibility', 'visible');
-    map.setLayoutProperty('topo', 'visibility', 'none');
-    setStatus('Kartverket map unavailable, showing OpenStreetMap');
+    if (e.sourceId === 'osm' && ++tileErrors === 3) setStatus('Map tiles are not loading. Check your connection.');
   });
   map.on('load', () => {
     map.addSource('route', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });

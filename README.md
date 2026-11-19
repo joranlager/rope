@@ -1,7 +1,7 @@
 # Rope
 
-A single-page web app with no backend of its own. It shows your GPS position on Kartverket's
-topographic map, shares live positions with a circle of trusted people, shows the distance to
+A single-page web app with no backend of its own. It shows your GPS position on an
+OpenStreetMap map, shares live positions with a circle of trusted people, shows the distance to
 each of them in metres, adds terrain heights from hoydedata, and plans routes.
 
 It is plain static files, so it runs on GitHub Pages.
@@ -52,9 +52,11 @@ guarantee needs software the subject can't control, such as a managed device.
 ## Limits and things to verify
 
 - **Not yet exercised against live services.** The build environment couldn't reach ntfy.sh,
-  Kartverket, Geonorge or the CDN. These need a check in a real browser: ntfy's `/sse` endpoint
-  and CORS, the hoydedata response shape (`punkter[0].z`) and CORS, the Kartverket tile URL, and
-  the OSRM responses.
+  OpenStreetMap, Geonorge or the CDN. These need a check in a real browser: ntfy's `/sse` endpoint
+  and CORS, the hoydedata response shape (`punkter[0].z`) and CORS, and the OSRM responses.
+- The base map uses the public OpenStreetMap tile server, which is meant for light use under its
+  [tile usage policy](https://operations.osmfoundation.org/policies/tiles/). For heavier use,
+  switch to a tile provider or your own tile server.
 - Public ntfy.sh is rate limited and keeps messages only for a limited time. Use your own server
   for regular use.
 - Routing uses the OSRM demo server (car only). Walk and bike need a different routing service.
