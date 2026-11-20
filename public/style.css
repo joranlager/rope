@@ -551,3 +551,31 @@ html[data-boot="reload"] .splash-reload { display: grid; }
   letter-spacing: 0.08em; margin: 6px 0 10px; user-select: all; font-variant-numeric: tabular-nums;
 }
 #tab-people #copy-link { margin-top: 12px; }
+
+/* Debug overlay (four quick taps on "All"). Always dark, so it reads over any map. */
+#debug-overlay {
+  position: fixed; z-index: 6; left: max(8px, env(safe-area-inset-left)); right: max(8px, env(safe-area-inset-right));
+  top: calc(max(10px, env(safe-area-inset-top)) + 58px); max-height: min(62vh, 640px);
+  display: flex; flex-direction: column; border-radius: 12px; overflow: hidden;
+  background: rgba(10, 14, 18, 0.86); color: #e8eef2; -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+  font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+}
+#debug-overlay[hidden] { display: none; }
+#debug-overlay .dbg-bar { display: flex; align-items: center; gap: 6px; padding: 6px 8px; background: rgba(255, 255, 255, 0.06); }
+#debug-overlay .dbg-counts { flex: 1; color: #9fb0bc; }
+#debug-overlay button {
+  font: inherit; color: #e8eef2; background: rgba(255, 255, 255, 0.12); border: 0; border-radius: 6px;
+  min-height: 28px; min-width: 28px; padding: 0 8px;
+}
+#debug-overlay .dbg-body { overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 4px 8px 8px; }
+#debug-overlay .dbg-sec { margin-top: 6px; }
+#debug-overlay .dbg-title { color: #7fd1ff; font-weight: 700; }
+#debug-overlay .dbg-row { display: flex; gap: 8px; }
+#debug-overlay .dbg-row > span:first-child { flex: 0 0 8.5em; color: #9fb0bc; overflow-wrap: anywhere; }
+#debug-overlay .dbg-row > span:last-child { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+#debug-overlay .warn, #debug-overlay .warn > span:last-child { color: #ffd166; }
+#debug-overlay .error, #debug-overlay .error > span:last-child { color: #ff7a7a; }
+#debug-overlay .dbg-log { list-style: none; margin: 8px 0 0; padding: 6px 0 0; border-top: 1px solid rgba(255, 255, 255, 0.12); }
+#debug-overlay .dbg-log li { overflow-wrap: anywhere; }
+#debug-overlay .dbg-log time { color: #7d8b95; }
+#debug-overlay .dbg-log b { color: #b7c6d0; font-weight: 600; }

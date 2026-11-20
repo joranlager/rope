@@ -88,6 +88,13 @@ is no accept step. The code works **once**, for **10 minutes**.
   it reads in whole metres (`850 m`); from 1 000 m it reads in kilometres (`1.25 km`, `12.3 km`, `152 km`).
   When a person is far away, the label sits on the part of the line that is on screen; if none of the
   line is on screen, the label is hidden.
+- **Debug overlay:** tap **All** four times quickly (within 1.5 s) to show connection details over the
+  map; four taps again, or ×, hide it. The choice is remembered on that device. It shows the build,
+  network and GPS state; the rendezvous server (messages sent and failed, rate limits, each stream's
+  state); per person the direct link (state, ICE, the route in use and its round-trip time, the next
+  retry and the last error) and messages sent/received directly and via the server; and a log of
+  recent events, warnings (yellow) and errors (red). **Copy** puts all of it on the clipboard, to
+  paste into a bug report.
 - **Scale:** a small scale line at the bottom left adapts as you zoom in and out.
 - **Colour:** each person, you included, has one colour, used for their map marker, avatar, arrow and trail.
   Pick it from the palette (or leave it on Auto) in their card, or under Me for yourself. It is set

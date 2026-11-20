@@ -6,6 +6,7 @@ import {
 } from './crypto.js';
 import { Relay, DEFAULT_RELAY } from './net.js';
 import { PeerLink, SIGNAL_MAX_AGE_MS } from './p2p.js';
+import { debugLog, logger, DebugOverlay, tapCounter, ago } from './debug.js';
 import {
   initialFollow, followMe, followPerson, followAll, dragged, pressPersonArrow, contactRemoved,
   meArrowState, personArrowState, allState,
@@ -23,6 +24,20 @@ import {
 } from './social.js';
 
 const $ = (sel) => document.querySelector(sel);
+
+// ---------- debug log (shown by the overlay: four quick taps on "All") ----------
+const log = { app: logger('app'), gps: logger('gps'), pair: logger('pair') };
+window.addEventListener('error', (e) => log.app('error', `${e.message} (${(e.filename ?? '').split('/').pop()}:${e.lineno})`));
+window.addEventListener('unhandledrejection', (e) => log.app('error', `unhandled: ${e.reason?.message ?? e.reason}`));
+window.addEventListener('online', () => log.app('info', 'network: online'));
+window.addEventListener('offline', () => log.app('warn', 'network: offline'));
+document.addEventListener('visibilitychange', () => log.app('info', `page ${document.visibilityState}`));
+const traffic = new Map(); // contact id -> { txRelay, txDirect, rxRelay, rxDirect, lastRx }
+const trafficOf = (id) => {
+  if (!traffic.has(id)) traffic.set(id, { txRelay: 0, txDirect: 0, rxRelay: 0, rxDirect: 0, lastRx: 0 });
+  return traffic.get(id);
+};
+const gpsInfo = { fixes: 0, lastFixAt: 0, lastError: '' };
 const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
@@ -71,6 +86,7 @@ function showToast(text) {
   toastTimer = setTimeout(() => { toast.hidden = true; }, 4000);
 }
 function setStatus(text) {
+  if (text !== 'GPS live') log.app(/^(Starting|Create your identity|Invite link copied|Code copied)/.test(text) ? 'info' : 'warn', `status: ${text}`);
   const ok = text === 'GPS live';
   $('#status-text').textContent = text;
   $('#status').dataset.tone = ok ? 'ok' : /^(Starting|Create your identity)/.test(text) ? 'idle' : 'warn';
@@ -523,6 +539,8 @@ function startGps() {
 }
 
 function onGpsError(err) {
+  gpsInfo.lastError = `${err.code}: ${err.message}`;
+  log.gps('error', `error ${err.code}: ${err.message}`);
   setStatus('GPS: no fix');
   showGpsBanner(GPS_HELP[err.code] ?? err.message);
   if (err.code === 1) stopGps(); // denied: stop retrying until the user taps Enable location
@@ -533,6 +551,9 @@ function onFix(p) {
   const { latitude: lat, longitude: lon, accuracy, altitude } = p.coords;
   const firstFix = myPos === null;
   myPos = { lat, lon, acc: accuracy };
+  gpsInfo.fixes++;
+  gpsInfo.lastFixAt = Date.now();
+  if (firstFix) log.gps('info', `first fix, ±${Math.round(accuracy)} m`);
   if (!myMarker) {
     const dot = makeEl('me-dot', '');
     dot.style.setProperty('--me', colorOf('me'));
@@ -624,8 +645,13 @@ async function sendPair(c, obj) {
   if (!ch) return true;
   const msg = { ...obj, fr: state.identity.id };
   const link = links.get(c.id);
-  if (link?.open && link.send(await seal(ch.aes, msg)) && obj.t === 'pos') return true;
+  const t = trafficOf(c.id);
+  if (link?.open && link.send(await seal(ch.aes, msg))) {
+    t.txDirect++;
+    if (obj.t === 'pos') return true;
+  }
   if (obj.t === 'pos' && Date.now() < relayPausedUntil) return false;
+  t.txRelay++;
   return publish(ch.topic, msg, ch.aes);
 }
 
@@ -657,7 +683,8 @@ function openLink(c) {
     myId: state.identity.id,
     theirId: c.id,
     signal: (obj) => sendPair(c, { ...obj, ts: Date.now() }),
-    onMessage: (text) => onPairMessage(c.id, text),
+    onMessage: (text) => onPairMessage(c.id, text, 'direct'),
+    log: logger(`p2p ${c.name}`),
     onChange: (isOpen) => {
       if (isOpen) { lastSentTo.delete(c.id); maybeSendPosition(); } // a direct link is up: send at once
       renderContacts();
@@ -681,16 +708,19 @@ async function sendAdminState(c) {
 async function openChannel(c) {
   const ch = await channelFromSecret(c.secret);
   channels.set(c.id, ch);
-  relay.subscribe(ch.topic, (text) => onPairMessage(c.id, text));
+  relay.subscribe(ch.topic, (text) => onPairMessage(c.id, text, 'relay'));
   openLink(c);
 }
 
-async function onPairMessage(id, text) {
+async function onPairMessage(id, text, via = 'relay') {
   const c = state.contacts[id];
   const ch = channels.get(id);
   if (!c || !ch) return;
   const msg = await open(ch.aes, text);
   if (!msg || msg.fr === state.identity.id) return; // my own message, echoed back by the relay
+  const t = trafficOf(id);
+  if (via === 'direct') t.rxDirect++; else t.rxRelay++;
+  t.lastRx = Date.now();
   if (msg.t === 'rtc') {
     if (Math.abs(Date.now() - Number(msg.ts)) <= SIGNAL_MAX_AGE_MS) links.get(id)?.onSignal(msg);
     return;
@@ -805,6 +835,7 @@ async function startPairing() {
   $('#pair-code').textContent = code;
   $('#pair-wait').textContent = 'Getting ready…';
   const ch = await pairChannel(code);
+  log.pair('info', 'showing a code, waiting for the other person');
   const expires = Date.now() + PAIR_CODE_TTL_MS;
   const myCard = encodeCard(cardOf(state.identity));
   pairing = {
@@ -824,6 +855,7 @@ async function startPairing() {
     let card;
     try { card = decodeCard(msg.card); } catch { return; }
     stopPairing(); // the code works once
+    log.pair('info', `code entered by ${card.n}`);
     try {
       const c = await addPaired(card);
       await publish(ch.topic, { t: 'pair-ack', card: myCard, n: msg.n }, ch.aes);
@@ -837,6 +869,7 @@ async function startPairing() {
 async function joinWithCode(code) {
   showAddMessage('Connecting…');
   const ch = await pairChannel(code);
+  log.pair('info', 'joining with a code');
   // Only an answer to this very request counts, not an older answer to someone else's (a spent code).
   const nonce = b64u.enc(crypto.getRandomValues(new Uint8Array(12)));
   let done;
@@ -851,6 +884,7 @@ async function joinWithCode(code) {
       throw new Error('Couldn’t reach the rendezvous server. Try again.');
     }
     const card = await Promise.race([answered, new Promise((r) => setTimeout(() => r(null), 45_000))]);
+    if (!card) log.pair('warn', 'no answer to the code');
     if (!card) throw new Error('No answer. Check the code (it works once, for 10 minutes) and that they are still waiting.');
     const c = await addPaired(card);
     showAddMessage(`Paired with ${c.name}.`);
@@ -1240,6 +1274,77 @@ const togglePanel = (name) => (openTab === name ? closePanel() : openPanel(name)
 
 const inviteLink = () => `${location.origin}${location.pathname}#c=${encodeCard(cardOf(state.identity))}`;
 
+// ---------- debug overlay ----------
+
+// Name a relay stream by what it is for, not by its (random-looking) topic.
+function streamName(topic) {
+  if (pairing?.topic === topic) return 'pairing code';
+  for (const [id, ch] of channels) if (ch.topic === topic) return `→ ${label(state.contacts[id] ?? { name: '?' })}`;
+  return topic.startsWith('rope-inbox-') ? 'my inbox' : topic.startsWith('rope-pair-') ? 'pairing (join)' : topic.slice(0, 14);
+}
+
+async function debugSnapshot() {
+  const now = Date.now();
+  const tone = (bad, warn) => (bad ? 'error' : warn ? 'warn' : '');
+  const sections = [{
+    title: 'App',
+    rows: [
+      ['build', $('#build')?.textContent ?? '?'],
+      ['network', navigator.onLine ? 'online' : 'OFFLINE', tone(!navigator.onLine)],
+      ['page', document.visibilityState],
+      ['WebRTC', globalThis.RTCPeerConnection ? 'available' : 'not available', tone(!globalThis.RTCPeerConnection)],
+    ],
+  }, {
+    title: 'GPS',
+    rows: [
+      ['watching', gpsWatch !== null ? 'yes' : 'no', tone(gpsWatch === null)],
+      ['fixes', `${gpsInfo.fixes}, last ${ago(gpsInfo.lastFixAt, now)} ago`, tone(false, gpsInfo.lastFixAt && now - gpsInfo.lastFixAt > 60_000)],
+      ['accuracy', myPos ? `±${Math.round(myPos.acc)} m` : '-'],
+      ...(gpsInfo.lastError ? [['last error', gpsInfo.lastError, 'warn']] : []),
+    ],
+  }];
+  if (relay) {
+    const st = relay.stats;
+    const paused = relayPausedUntil > now ? Math.ceil((relayPausedUntil - now) / 1000) : 0;
+    sections.push({
+      title: `Rendezvous ${relay.base.replace(/^https?:\/\//, '')}`,
+      rows: [
+        ['sent', `${st.sent} ok, last ${ago(st.lastOkAt, now)} ago`],
+        ['failed', `${st.failed} (${st.rateLimited} rate-limited), ${st.retries} retries`, tone(false, st.failed)],
+        ...(st.lastError ? [['last error', `${st.lastError}, ${ago(st.lastErrorAt, now)} ago`, now - st.lastErrorAt < 120_000 ? 'error' : 'warn']] : []),
+        ...(paused ? [['positions paused', `${paused} s (rate limit)`, 'error']] : []),
+        ...relay.streams().map((x) => [`stream ${streamName(x.topic)}`,
+          `${x.state}, msg ${ago(x.lastMsgAt, now)} ago, opens ${x.opens}, errors ${x.errors}`, tone(x.state === 'closed', x.state !== 'open')]),
+      ],
+    });
+  }
+  if (pairing) sections.push({ title: 'Pairing', rows: [['code', `${pairing.code}, ${Math.ceil((pairing.expires - now) / 1000)} s left`]] });
+  for (const c of Object.values(state?.contacts ?? {})) {
+    const rows = [['status', c.status === 'active' ? (seeingThem(c) ? 'active, sharing with me' : 'active, hidden from me') : c.status]];
+    const link = links.get(c.id);
+    if (link) {
+      const ls = link.status();
+      rows.push(['direct link', `${ls.state} (${ls.role}), ICE ${ls.ice}, attempts ${ls.attempts}`, tone(false, ls.state !== 'open')]);
+      if (ls.retryInMs) rows.push(['next try', `in ${Math.ceil(ls.retryInMs / 1000)} s`]);
+      if (ls.lastError) rows.push(['link error', ls.lastError, 'warn']);
+      if (ls.state === 'open') {
+        const r = await link.route();
+        if (r) rows.push(['route', `${r.local} → ${r.remote}${r.rttMs != null ? `, ${r.rttMs} ms` : ''}`]);
+      }
+    }
+    const t = traffic.get(c.id);
+    if (t) {
+      rows.push(['sent', `${t.txDirect} direct, ${t.txRelay} via server`]);
+      rows.push(['received', `${t.rxDirect} direct, ${t.rxRelay} via server, last ${ago(t.lastRx, now)} ago`]);
+    }
+    rows.push(['their position', c.pos ? `${ago(c.pos.ts, now)} old` : 'none', tone(false, !c.pos || isStale(c.pos))]);
+    sections.push({ title: label(c), rows });
+  }
+  return sections;
+}
+
+const debugOverlay = new DebugOverlay(debugSnapshot);
+
 async function startApp() {
   $('#auth').hidden = true;
   $('#menu').hidden = false; // the map stays in view; panels open from the top menu
@@ -1249,7 +1354,8 @@ async function startApp() {
   renderFollowUi();
   startGps(); // first, so a failure further down can't leave location unasked
   keys = await loadKeys(state.identity);
-  relay = new Relay(state.relay || DEFAULT_RELAY);
+  relay = new Relay(state.relay || DEFAULT_RELAY, { log: logger('relay') });
+  log.app('info', `started, build ${$('#build')?.textContent}, relay ${relay.base}`);
   relay.subscribe(await inboxTopic(state.identity.ecdhPub), onInboxMessage, '12h');
   for (const c of activeContacts()) await openChannel(c);
   for (const c of activeContacts()) if (c.adminTouched) sendAdminState(c);
@@ -1360,7 +1466,9 @@ function wire() {
     renderDistances();
     if (state.showDistances && !myPos) setStatus('Waiting for your location…');
   });
+  const allTaps = tapCounter();
   $('#menu-all').addEventListener('click', () => {
+    if (allTaps()) showToast(debugOverlay.toggle() ? 'Debug overlay on (tap All 4 times to hide)' : 'Debug overlay off');
     closePanel(); // show the map
     if (!myPos) { startGps(); setStatus('Waiting for your location…'); }
     setFollow(followAll(follow), { recentre: true });

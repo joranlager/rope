@@ -15,6 +15,7 @@ export class RelayError extends Error {
   }
 }
 
+const short = (topic) => topic.replace(/^(rope-(?:inbox-|pair-)?)(.{6}).*$/, '$1$2…');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function timeoutSignal(ms) {
@@ -25,19 +26,34 @@ function timeoutSignal(ms) {
 }
 
 export class Relay {
-  constructor(base = DEFAULT_RELAY, { fetchImpl, EventSourceImpl, delays = RETRY_DELAYS_MS } = {}) {
+  constructor(base = DEFAULT_RELAY, { fetchImpl, EventSourceImpl, delays = RETRY_DELAYS_MS, log = () => {} } = {}) {
     this.base = base.replace(/\/$/, '');
     this.fetch = fetchImpl ?? ((...a) => fetch(...a));
     this.EventSource = EventSourceImpl ?? globalThis.EventSource;
     this.delays = delays;
-    this.subs = new Map(); // topic -> { es, onMessage, since, lastId }
+    this.log = log; // log(level, text): 'info' | 'warn' | 'error', for the debug overlay
+    this.subs = new Map(); // topic -> { es, onMessage, since, lastId, opens, errors, lastMsgAt }
+    this.stats = { sent: 0, failed: 0, retries: 0, rateLimited: 0, lastOkAt: 0, lastError: '', lastErrorAt: 0 };
+  }
+
+  #failed(err) {
+    this.stats.failed++;
+    if (err.kind === 'rate') this.stats.rateLimited++;
+    this.stats.lastError = err.message;
+    this.stats.lastErrorAt = Date.now();
+    this.log(err.kind === 'rate' ? 'warn' : 'error', `publish failed: ${err.message}`);
+    return err;
   }
 
   /** Posts once, retrying network errors, timeouts and 5xx a couple of times before giving up. A 429 is not retried. */
   async publish(topic, text) {
     let err;
     for (let attempt = 0; attempt <= this.delays.length; attempt++) {
-      if (attempt) await sleep(this.delays[attempt - 1]);
+      if (attempt) {
+        this.stats.retries++;
+        this.log('warn', `publish retry ${attempt} after: ${err.message}`);
+        await sleep(this.delays[attempt - 1]);
+      }
       let res;
       try {
         res = await this.fetch(`${this.base}/${topic}`, { method: 'POST', body: text, signal: timeoutSignal(PUBLISH_TIMEOUT_MS) });
@@ -45,24 +61,28 @@ export class Relay {
         err = new RelayError('offline', e?.message || 'Network error');
         continue;
       }
-      if (res.ok) return;
+      if (res.ok) {
+        this.stats.sent++;
+        this.stats.lastOkAt = Date.now();
+        return;
+      }
       if (res.status === 429) {
         // Rate-limited: retrying soon only digs deeper. Say how long to wait, if the server told us.
         err = new RelayError('rate', 'Relay rate limit (429)');
         const after = Number(res.headers?.get?.('Retry-After'));
         if (Number.isFinite(after) && after > 0) err.retryAfterMs = Math.min(after, 600) * 1000;
-        throw err;
+        throw this.#failed(err);
       }
       err = new RelayError('server', `Relay refused message (${res.status})`);
-      if (res.status < 500) throw err; // other 4xx won't fix itself
+      if (res.status < 500) throw this.#failed(err); // other 4xx won't fix itself
     }
-    throw err;
+    throw this.#failed(err);
   }
 
   /** onMessage(text, unixSeconds). Reconnects automatically; `since` replays recent messages. */
   subscribe(topic, onMessage, since = '5m') {
     if (this.subs.has(topic)) return;
-    const sub = { es: null, onMessage, since, lastId: null };
+    const sub = { es: null, onMessage, since, lastId: null, opens: 0, errors: 0, lastMsgAt: 0 };
     this.subs.set(topic, sub);
     this.#open(topic, sub);
   }
@@ -71,7 +91,11 @@ export class Relay {
     // After a drop, resume from the last message seen so nothing sent meanwhile is missed.
     const since = sub.lastId ?? sub.since;
     const es = new this.EventSource(`${this.base}/${topic}/sse?since=${encodeURIComponent(since)}`);
+    sub.opens++;
+    if (sub.opens > 1) this.log('info', `stream ${short(topic)} reopened (#${sub.opens})`);
+    es.onopen = () => this.log('info', `stream ${short(topic)} connected`);
     es.onmessage = (e) => {
+      sub.lastMsgAt = Date.now();
       try {
         const data = JSON.parse(e.data);
         if (data.event !== 'message') return;
@@ -84,6 +108,9 @@ export class Relay {
     // The browser retries a dropped stream by itself, but gives up for good after an HTTP error
     // (a 429, or a captive page while the phone switches networks). Then we reopen it ourselves.
     es.onerror = () => {
+      sub.errors++;
+      this.log(es.readyState === CLOSED ? 'error' : 'warn',
+        `stream ${short(topic)} ${es.readyState === CLOSED ? 'closed by the browser, reopening in 5 s' : 'dropped, browser retrying'}`);
       if (es.readyState === CLOSED) setTimeout(() => { if (sub.es === es && this.subs.get(topic) === sub) this.#open(topic, sub); }, 5_000);
     };
     sub.es = es;
@@ -97,6 +124,14 @@ export class Relay {
         this.#open(topic, sub);
       }
     }
+  }
+
+  /** For the debug overlay: one row per stream. */
+  streams() {
+    const names = ['connecting', 'open', 'closed'];
+    return [...this.subs].map(([topic, sub]) => ({
+      topic, state: names[sub.es?.readyState] ?? '?', opens: sub.opens, errors: sub.errors, lastMsgAt: sub.lastMsgAt,
+    }));
   }
 
   unsubscribe(topic) {

@@ -83,6 +83,12 @@ export function buildSdp(o) {
   return lines.join('\r\n') + '\r\n';
 }
 
+/** "2 host, 1 public" — for logs. */
+export function describeCandidates(o) {
+  const n = (k) => (o?.c ?? []).filter((c) => c[2] === k).length;
+  return `${n('h')} host, ${n('s')} public`;
+}
+
 export function validCompact(o) {
   return Boolean(o && typeof o === 'object' && (o.t === 'o' || o.t === 'a') &&
     typeof o.u === 'string' && o.u && typeof o.p === 'string' && o.p && typeof o.f === 'string' && o.f &&
@@ -108,8 +114,11 @@ function waitGathering(pc, ms) {
  *  onChange(open)   the link opened or closed
  */
 export class PeerLink {
-  constructor({ myId, theirId, signal, onMessage, onChange, RTC = globalThis.RTCPeerConnection, iceServers = ICE_SERVERS }) {
-    Object.assign(this, { myId, theirId, signal, onMessage, onChange, RTC, iceServers });
+  constructor({ myId, theirId, signal, onMessage, onChange, RTC = globalThis.RTCPeerConnection, iceServers = ICE_SERVERS, log = () => {} }) {
+    Object.assign(this, { myId, theirId, signal, onMessage, onChange, RTC, iceServers, log });
+    this.retryAt = 0;
+    this.attempts = 0;
+    this.lastError = '';
     this.offerer = isOfferer(myId, theirId);
     this.pc = null;
     this.dc = null;
@@ -136,10 +145,17 @@ export class PeerLink {
     this.#start();
   }
 
-  #start() {
+  #clearRetry() {
     clearTimeout(this.retryTimer);
     this.retryTimer = null;
+    this.retryAt = 0;
+  }
+
+  #start() {
+    this.#clearRetry();
     this.lastStart = Date.now();
+    this.attempts++;
+    this.log('info', this.offerer ? `attempt ${this.attempts}: making an offer` : `attempt ${this.attempts}: asking them for an offer`);
     if (this.offerer) this.#offer();
     else {
       this.signal({ t: 'rtc', k: 'req' }); // ask the offerer for a fresh offer
@@ -157,7 +173,8 @@ export class PeerLink {
     if (this.closed || this.retryTimer) return;
     const wait = this.backoff;
     this.backoff = Math.min(this.backoff * 2, RETRY_MAX_MS);
-    this.retryTimer = setTimeout(() => { this.retryTimer = null; this.kick(); }, wait);
+    this.retryAt = Date.now() + wait;
+    this.retryTimer = setTimeout(() => { this.retryTimer = null; this.retryAt = 0; this.kick(); }, wait);
   }
 
   #teardown() {
@@ -171,8 +188,10 @@ export class PeerLink {
     if (this.wasOpen) { this.wasOpen = false; this.onChange?.(false); }
   }
 
-  #fail(pc) {
+  #fail(pc, why) {
     if (pc !== this.pc) return; // an older attempt
+    this.lastError = why;
+    this.log(this.wasOpen ? 'warn' : 'error', `${this.wasOpen ? 'direct link lost' : 'direct link failed'}: ${why}`);
     this.#teardown();
     this.#schedule();
   }
@@ -184,12 +203,13 @@ export class PeerLink {
     let grace = null;
     pc.oniceconnectionstatechange = () => {
       const s = pc.iceConnectionState;
-      if (s === 'failed' || s === 'closed') this.#fail(pc);
-      else if (s === 'disconnected') grace = this.#after(DISCONNECT_GRACE_MS, () => { if (pc.iceConnectionState === 'disconnected') this.#fail(pc); });
+      if (pc === this.pc) this.log(s === 'failed' ? 'error' : 'info', `ICE ${s}`);
+      if (s === 'failed' || s === 'closed') this.#fail(pc, `ICE ${s}`);
+      else if (s === 'disconnected') grace = this.#after(DISCONNECT_GRACE_MS, () => { if (pc.iceConnectionState === 'disconnected') this.#fail(pc, 'ICE disconnected for 8 s'); });
       else if (grace) { clearTimeout(grace); this.timers.delete(grace); grace = null; }
     };
     pc.ondatachannel = (e) => this.#useChannel(pc, e.channel);
-    this.#after(ATTEMPT_MS, () => { if (pc === this.pc && !this.open) this.#fail(pc); });
+    this.#after(ATTEMPT_MS, () => { if (pc === this.pc && !this.open) this.#fail(pc, `not open after ${ATTEMPT_MS / 1000} s`); });
     return pc;
   }
 
@@ -197,13 +217,16 @@ export class PeerLink {
     if (pc !== this.pc) return;
     this.dc = dc;
     dc.onopen = () => {
-      if (pc !== this.pc) return;
+      if (pc !== this.pc || this.wasOpen) return; // stale, or already handled
+      this.#clearRetry();
       this.backoff = RETRY_MIN_MS;
       this.wasOpen = true;
+      this.lastError = '';
+      this.log('info', 'direct link open');
       this.onChange?.(true);
     };
     dc.onmessage = (e) => { if (typeof e.data === 'string') this.onMessage(e.data); };
-    dc.onclose = () => this.#fail(pc);
+    dc.onclose = () => this.#fail(pc, 'data channel closed');
     if (dc.readyState === 'open') dc.onopen();
   }
 
@@ -235,9 +258,11 @@ export class PeerLink {
       await pc.setLocalDescription(await pc.createOffer());
       await waitGathering(pc, GATHER_MS);
       if (pc !== this.pc) return;
-      this.signal({ t: 'rtc', k: 'o', sid, d: encodeDesc(pc.localDescription) });
-    } catch {
-      this.#fail(this.pc);
+      const d = encodeDesc(pc.localDescription);
+      this.log('info', `offer sent (${describeCandidates(d)})`);
+      this.signal({ t: 'rtc', k: 'o', sid, d });
+    } catch (err) {
+      this.#fail(this.pc, `offer: ${err?.message ?? err}`);
     }
   }
 
@@ -249,16 +274,19 @@ export class PeerLink {
       await pc.setLocalDescription(await pc.createAnswer());
       await waitGathering(pc, GATHER_MS);
       if (pc !== this.pc) return;
-      this.signal({ t: 'rtc', k: 'a', sid, d: encodeDesc(pc.localDescription) });
+      const d = encodeDesc(pc.localDescription);
+      this.log('info', `answer sent (${describeCandidates(d)})`);
+      this.signal({ t: 'rtc', k: 'a', sid, d });
       this.#punch(pc, remote);
-    } catch {
-      this.#fail(this.pc);
+    } catch (err) {
+      this.#fail(this.pc, `answer: ${err?.message ?? err}`);
     }
   }
 
   /** A signal from the contact, already decrypted, checked for age and not an echo of my own. */
   async onSignal(msg) {
     if (this.closed || !this.RTC || !msg || typeof msg.sid !== 'string' && msg.k !== 'req') return;
+    this.log('info', `signal in: ${{ req: 'request', o: 'offer', a: 'answer' }[msg.k] ?? msg.k}${msg.d ? ` (${describeCandidates(msg.d)})` : ''}`);
     if (msg.k === 'req') {
       // The answerer only asks when it has no link, so if ours still looks open it is dead on their
       // side: offer afresh at once. Otherwise offer unless an attempt has only just started.
@@ -269,23 +297,62 @@ export class PeerLink {
     if (msg.k === 'o' && !this.offerer && msg.d.t === 'o') {
       if (msg.sid === this.sid) return; // the same offer again (replay)
       this.lastStart = Date.now();
-      clearTimeout(this.retryTimer);
-      this.retryTimer = null;
+      this.#clearRetry();
       await this.#answer(msg.sid, msg.d);
     } else if (msg.k === 'a' && this.offerer && msg.d.t === 'a' && msg.sid === this.sid && this.pc?.signalingState === 'have-local-offer') {
       const pc = this.pc;
       try {
         await pc.setRemoteDescription({ type: 'answer', sdp: buildSdp(msg.d) });
         this.#punch(pc, msg.d);
-      } catch {
-        this.#fail(pc);
+      } catch (err) {
+        this.#fail(pc, `their answer: ${err?.message ?? err}`);
       }
+    }
+  }
+
+  /** For the debug overlay. */
+  status() {
+    const pc = this.pc;
+    return {
+      state: this.open ? 'open' : pc ? 'connecting' : this.retryAt ? 'waiting' : 'idle',
+      role: this.offerer ? 'offerer' : 'answerer',
+      ice: pc?.iceConnectionState ?? '-',
+      signaling: pc?.signalingState ?? '-',
+      attempts: this.attempts,
+      retryInMs: this.retryAt ? Math.max(0, this.retryAt - Date.now()) : 0,
+      lastError: this.lastError,
+    };
+  }
+
+  /** The candidate pair in use: e.g. { local: 'srflx 84.1.2.3:4000 udp', remote: 'host …', rttMs }. */
+  async route() {
+    const pc = this.pc;
+    if (!pc?.getStats) return null;
+    try {
+      const stats = await pc.getStats();
+      let pair = null;
+      stats.forEach((r) => {
+        if (r.type === 'transport' && r.selectedCandidatePairId) pair = stats.get(r.selectedCandidatePairId);
+      });
+      if (!pair) stats.forEach((r) => { if (!pair && r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') pair = r; });
+      if (!pair) return null;
+      const cand = (id) => {
+        const c = stats.get(id);
+        return c ? `${c.candidateType} ${c.address || c.ip || '(hidden)'}:${c.port} ${c.protocol ?? ''}`.trim() : '?';
+      };
+      return {
+        local: cand(pair.localCandidateId),
+        remote: cand(pair.remoteCandidateId),
+        rttMs: Number.isFinite(pair.currentRoundTripTime) ? Math.round(pair.currentRoundTripTime * 1000) : null,
+      };
+    } catch {
+      return null;
     }
   }
 
   close() {
     this.closed = true;
-    clearTimeout(this.retryTimer);
+    this.#clearRetry();
     this.#teardown();
   }
 }
