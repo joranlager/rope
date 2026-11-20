@@ -23,6 +23,25 @@ own ntfy server under **Me → Rendezvous server**. Everyone in a circle must us
 
 1. **Identity.** On first run your browser creates two keys (ECDH for pairing, ECDSA for signing)
    and stores them in `localStorage`. Nothing is uploaded.
+
+**Pairing with a code** (the simple way, after BeamBridge). One person taps **People → Pair with a
+code** and gets a code like `37-48219305`; the other types it into the same field where links are
+pasted and taps **Add**. Both are contacts straight away: knowing the code is the consent, so there
+is no accept step. The code works **once**, for **10 minutes**.
+
+- The code is the only secret. Both phones turn it into the same rendezvous topic and AES-GCM key
+  with a deliberately slow derivation (PBKDF2-SHA-256, 600 000 rounds, then HKDF), and swap their
+  contact cards (name and public keys) sealed with that key. Then pairing continues as in step 4.
+- The person who enters the code sends a random nonce and only accepts the answer that quotes it,
+  so an old answer for a spent code is never taken for a new one.
+- Security, compared with BeamBridge: BeamBridge runs a PAKE (SPAKE2) over magic-wormhole, so a
+  wrong guess burns the code and nobody can test codes offline. Browsers have no PAKE built in, so
+  Rope relies on the code being unguessable for its 10 minutes: 10 digits (10^10 codes) times
+  600 000 rounds each is far more than anyone can try in that time, the rendezvous server only sees
+  a topic derived from the code, and once pairing is over nothing secret remains (the cards hold
+  public keys only). Give the code only to the person you mean, over a channel you trust.
+
+**Pairing with an invite link** (still there, under the code):
 2. **Invite.** *Copy my invite link* gives a reusable link (`…#c=<card>`). The card holds your name
    and public keys. The part after `#` is never sent to a web server.
 3. **Request.** The person who opens the link sends a request to your inbox topic on the
@@ -31,6 +50,25 @@ own ntfy server under **Me → Rendezvous server**. Everyone in a circle must us
    It gives each contact its own AES-GCM key and its own unguessable topic.
 5. **Sharing.** Positions are encrypted and published to that contact's topic every 10 s.
    The rendezvous server only relays ciphertext.
+6. **Direct link (peer to peer).** Each pair also tries to open a direct WebRTC data channel, after
+   OneChat's serverless connect. The offer and answer are packed into compact codes (ICE ufrag and
+   password, DTLS fingerprint, UDP candidates) and sent over the encrypted pair topic; the other side
+   rebuilds the SDP from a template. A public STUN server (Google, Cloudflare) tells each phone its
+   public address, and the peer's public candidates are re-added every few seconds so both NATs keep
+   their hole open until the checks meet. The side with the lower id always offers, so the two never
+   offer at once. Because the fingerprint arrives sealed with the contact's key, only that contact can
+   complete the handshake.
+   While the direct link is open, positions go straight between the phones every 3 s and the
+   rendezvous server is not used for them (visibility and admin messages still go through it too,
+   so a phone that is offline gets them later). If the link can't open (some mobile networks block
+   direct connections and there is no TURN relay) or drops, positions fall back to the rendezvous
+   server, and the link is retried with back-off (20 s doubling to 5 min), and at once when the
+   network comes back or the app is reopened. Each contact shows **direct** or **via server**.
+7. **Rate limits.** ntfy.sh limits requests per IP address, and mobile carriers often put many
+   phones behind one address. A failed send is retried twice; a *429 Too Many Requests* is not
+   retried, and position updates over the server pause for as long as it asks (`Retry-After`).
+   Every pair message carries the sender's id, because the server echoes your own messages back
+   on the shared topic.
 
 ## Following, trails and reload
 

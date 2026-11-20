@@ -542,3 +542,12 @@ html[data-boot="reload"] .splash-reload { display: grid; }
   -webkit-backdrop-filter: saturate(180%) blur(24px); backdrop-filter: saturate(180%) blur(24px);
   color: var(--label); animation: rise 0.25s var(--ease) both; pointer-events: none;
 }
+
+/* Pairing code (People): big, spaced digits that are easy to read out loud. */
+.pair-show { margin: 0 0 12px; padding: 12px; border-radius: 12px; background: var(--tint-bg); text-align: center; }
+.pair-show .row { justify-content: center; }
+.pair-code {
+  font: 600 2rem/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 0.08em; margin: 6px 0 10px; user-select: all; font-variant-numeric: tabular-nums;
+}
+#tab-people #copy-link { margin-top: 12px; }

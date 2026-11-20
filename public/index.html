@@ -108,12 +108,22 @@
 
     <!-- People -->
     <section id="tab-people" class="tabpanel">
-      <button id="copy-link" class="primary wide">Copy my invite link</button>
+      <button id="pair-new" class="primary wide">Pair with a code</button>
+      <div id="pair-show" class="pair-show" hidden>
+        <p class="muted small">Tell the other person this code. It works once, for 10 minutes.</p>
+        <div id="pair-code" class="pair-code" aria-live="polite"></div>
+        <div class="row">
+          <button id="pair-copy" class="tinted" type="button">Copy</button>
+          <button id="pair-cancel" class="ghost" type="button">Cancel</button>
+        </div>
+        <p id="pair-wait" class="muted small">Waiting for them to enter it…</p>
+      </div>
       <form id="add-form" class="row">
-        <input id="add-code" placeholder="Paste an invite link or code" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Invite link or code">
+        <input id="add-code" placeholder="Enter a code, or paste an invite link" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Pairing code or invite link">
         <button type="submit" class="tinted">Add</button>
       </form>
       <p id="add-error" class="error" hidden></p>
+      <button id="copy-link" class="ghost wide">Copy my invite link instead</button>
       <ul id="requests" class="contacts requests" hidden></ul>
       <ul id="contacts" class="contacts"></ul>
     </section>

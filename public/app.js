@@ -2,8 +2,10 @@ import { haversineM, formatMetres, elevationGainLoss } from './geo.js';
 import {
   newIdentity, loadKeys, cardOf, encodeCard, decodeCard, fingerprint, inboxTopic,
   deriveSecret, channelFromSecret, seal, open, signObj, verifyObj,
+  newPairCode, normalizePairCode, pairChannel, PAIR_CODE_TTL_MS, b64u,
 } from './crypto.js';
 import { Relay, DEFAULT_RELAY } from './net.js';
+import { PeerLink, SIGNAL_MAX_AGE_MS } from './p2p.js';
 import {
   initialFollow, followMe, followPerson, followAll, dragged, pressPersonArrow, contactRemoved,
   meArrowState, personArrowState, allState,
@@ -27,7 +29,8 @@ const esc = (s) =>
 const STORE_KEY = 'rope.v1';
 const ELEVATION_URL = 'https://ws.geonorge.no/hoydedata/v1/punkt';
 const ROUTING = { car: 'https://router.project-osrm.org/route/v1/driving' };
-const SEND_EVERY_MS = 10_000; // public relays rate-limit; this keeps a few contacts well inside it
+const SEND_EVERY_MS = 10_000;   // over the rendezvous server: public relays rate-limit
+const SEND_DIRECT_MS = 3_000;   // over a direct (peer-to-peer) link: no limit but the battery
 
 // ---------- local state ----------
 // state = { identity, visible, relay, contacts: { [id]: contact } }
@@ -37,8 +40,9 @@ let state = null;
 let keys = null;                 // imported private keys
 let relay = null;
 const channels = new Map();      // contact id -> { aes, topic }
+const links = new Map();         // contact id -> PeerLink (direct WebRTC channel)
+const lastSentTo = new Map();    // contact id -> when my position last went to them
 let myPos = null;
-let lastSent = 0;
 let map = null, myMarker = null, destMarker = null, routeMode = false, destination = null;
 const markers = new Map();
 let terrainFor = null, terrainAt = 0;
@@ -576,25 +580,97 @@ async function maybeUpdateTerrain() {
 
 // ---------- messaging ----------
 
+// The relay already retries a few times, so a failure here means a real outage. Say so once
+// (not once per contact and per position), in words that match the cause.
+let relayDown = false, relayWarnedAt = 0, relayPausedUntil = 0;
+const RELAY_ERROR_TEXT = {
+  offline: 'No connection to the rendezvous server. Retrying…',
+  rate: 'The rendezvous server is busy (rate limit). Retrying…',
+  server: 'The rendezvous server refused a message',
+};
+function relayFailed(err) {
+  relayDown = true;
+  // Rate-limited: hold back position updates until the server says it's fine (direct links carry on).
+  if (err?.kind === 'rate') relayPausedUntil = Date.now() + (err.retryAfterMs || 30_000);
+  if (Date.now() - relayWarnedAt < 60_000) return;
+  relayWarnedAt = Date.now();
+  const kind = navigator.onLine === false ? 'offline' : err?.kind;
+  setStatus(RELAY_ERROR_TEXT[kind] ?? RELAY_ERROR_TEXT.offline);
+}
+function relayOk() {
+  if (!relayDown) return;
+  relayDown = false;
+  relayWarnedAt = 0;
+  setStatus(myPos ? 'GPS live' : 'Connected to the rendezvous server');
+}
+
 async function publish(topic, obj, aes) {
   try {
     await relay.publish(topic, aes ? await seal(aes, obj) : JSON.stringify(obj));
-  } catch {
-    setStatus('Can’t reach the rendezvous server'); // a plain "Failed to fetch" tells the user nothing
+    relayOk();
+    return true;
+  } catch (err) {
+    relayFailed(err);
+    return false;
   }
 }
 
+// Every pair message carries my id: the relay echoes my own messages back on the shared topic,
+// and without it they would be taken for the contact's.
+// Positions go over the direct link when it is open, else over the relay. Everything else goes over
+// the relay too (the relay keeps it a while for a phone that is offline right now).
 async function sendPair(c, obj) {
   const ch = channels.get(c.id);
-  if (ch) await publish(ch.topic, obj, ch.aes);
+  if (!ch) return true;
+  const msg = { ...obj, fr: state.identity.id };
+  const link = links.get(c.id);
+  if (link?.open && link.send(await seal(ch.aes, msg)) && obj.t === 'pos') return true;
+  if (obj.t === 'pos' && Date.now() < relayPausedUntil) return false;
+  return publish(ch.topic, msg, ch.aes);
 }
 
 function maybeSendPosition(force = false) {
-  if (!myPos || (!force && Date.now() - lastSent < SEND_EVERY_MS)) return;
-  lastSent = Date.now();
+  if (!myPos) return;
+  const now = Date.now();
   for (const c of activeContacts()) {
-    if (shouldSendPosition(me(), c)) sendPair(c, { t: 'pos', ts: Date.now(), lat: myPos.lat, lon: myPos.lon, acc: myPos.acc });
+    if (!shouldSendPosition(me(), c)) continue;
+    const every = links.get(c.id)?.open ? SEND_DIRECT_MS : SEND_EVERY_MS;
+    if (!force && now - (lastSentTo.get(c.id) ?? 0) < every) continue;
+    lastSentTo.set(c.id, now);
+    sendPair(c, { t: 'pos', ts: now, lat: myPos.lat, lon: myPos.lon, acc: myPos.acc })
+      .then((ok) => { if (!ok) lastSentTo.delete(c.id); }); // send the newest fix as soon as the next one arrives
   }
+}
+
+// Coming back from a dead zone or from the background: reopen dropped streams and direct links,
+// and send where I am now.
+function onNetworkBack() {
+  if (!relay) return;
+  relay.reconnect();
+  for (const link of links.values()) link.kick();
+  maybeSendPosition(true);
+}
+
+function openLink(c) {
+  if (links.has(c.id) || !globalThis.RTCPeerConnection) return;
+  const link = new PeerLink({
+    myId: state.identity.id,
+    theirId: c.id,
+    signal: (obj) => sendPair(c, { ...obj, ts: Date.now() }),
+    onMessage: (text) => onPairMessage(c.id, text),
+    onChange: (isOpen) => {
+      if (isOpen) { lastSentTo.delete(c.id); maybeSendPosition(); } // a direct link is up: send at once
+      renderContacts();
+    },
+  });
+  links.set(c.id, link);
+  link.kick();
+}
+
+function closeLink(id) {
+  links.get(id)?.close();
+  links.delete(id);
+  lastSentTo.delete(id);
 }
 
 async function sendAdminState(c) {
@@ -606,6 +682,7 @@ async function openChannel(c) {
   const ch = await channelFromSecret(c.secret);
   channels.set(c.id, ch);
   relay.subscribe(ch.topic, (text) => onPairMessage(c.id, text));
+  openLink(c);
 }
 
 async function onPairMessage(id, text) {
@@ -613,7 +690,11 @@ async function onPairMessage(id, text) {
   const ch = channels.get(id);
   if (!c || !ch) return;
   const msg = await open(ch.aes, text);
-  if (!msg) return;
+  if (!msg || msg.fr === state.identity.id) return; // my own message, echoed back by the relay
+  if (msg.t === 'rtc') {
+    if (Math.abs(Date.now() - Number(msg.ts)) <= SIGNAL_MAX_AGE_MS) links.get(id)?.onSignal(msg);
+    return;
+  }
   let adminVerified = false;
   if (msg.t === 'admin') {
     adminVerified = await verifyObj(c.s, adminPayload(msg.on, msg.ts), msg.sig);
@@ -634,6 +715,8 @@ async function activate(c) {
   saveState();
   await sendPair(c, { t: 'vis', v: state.visible });
   if (c.adminTouched) await sendAdminState(c);
+  lastSentTo.delete(c.id);
+  maybeSendPosition(); // a new contact sees me straight away, not at my next GPS fix
   renderAll();
 }
 
@@ -673,6 +756,108 @@ async function addContactFromCode(raw) {
   if (state.contacts[id].status === 'request') await acceptRequest(id);
   else await publish(await inboxTopic(card.e), { t: 'hello', card: encodeCard(cardOf(state.identity)) });
   renderAll();
+}
+
+// ---------- pairing with a one-time code (after BeamBridge) ----------
+// The person who asks for a code listens on the code's topic; the other enters the code and sends
+// their card there, sealed with the code's key. The listener adds them, answers with its own card,
+// and the code is spent. Both sides are then contacts straight away: knowing the code is the consent.
+
+let pairing = null; // { code, topic, expires, timer, tick } while I'm showing a code
+const nowSince = () => String(Math.floor(Date.now() / 1000) - 5); // only messages from now on
+
+function stopPairing(text) {
+  if (!pairing) return;
+  relay.unsubscribe(pairing.topic);
+  clearTimeout(pairing.timer);
+  clearInterval(pairing.tick);
+  pairing = null;
+  $('#pair-show').hidden = true;
+  $('#pair-new').hidden = false;
+  if (text) showAddMessage(text);
+}
+
+function showAddMessage(text, isError = false) {
+  const out = $('#add-error');
+  out.hidden = false;
+  out.classList.toggle('error', isError);
+  out.textContent = text;
+}
+
+// Adds (or re-activates) the person behind a card received over a pairing code.
+async function addPaired(card) {
+  const id = await fingerprint(card.e);
+  if (id === state.identity.id) throw new Error('That is your own code');
+  const existing = state.contacts[id];
+  if (existing?.status === 'active') return existing;
+  const c = { ...(existing ?? {}), id, name: card.n, e: card.e, s: card.s, status: 'pending' };
+  state.contacts[id] = c;
+  await activate(c);
+  return c;
+}
+
+async function startPairing() {
+  stopPairing();
+  $('#add-error').hidden = true;
+  const code = newPairCode();
+  $('#pair-new').hidden = true;
+  $('#pair-show').hidden = false;
+  $('#pair-code').textContent = code;
+  $('#pair-wait').textContent = 'Getting ready…';
+  const ch = await pairChannel(code);
+  const expires = Date.now() + PAIR_CODE_TTL_MS;
+  const myCard = encodeCard(cardOf(state.identity));
+  pairing = {
+    code, topic: ch.topic, expires,
+    timer: setTimeout(() => stopPairing('The code expired. Get a new one when you’re ready.'), PAIR_CODE_TTL_MS),
+    tick: setInterval(() => {
+      const left = Math.max(0, Math.ceil((expires - Date.now()) / 60_000));
+      $('#pair-wait').textContent = `Waiting for them to enter it… (${left} min left)`;
+    }, 15_000),
+  };
+  $('#pair-wait').textContent = 'Waiting for them to enter it… (10 min left)';
+  const mine = pairing;
+  relay.subscribe(ch.topic, async (text) => {
+    if (pairing !== mine) return;
+    const msg = await open(ch.aes, text);
+    if (msg?.t !== 'pair-hello' || typeof msg.n !== 'string') return; // my own answer echoed back, or noise
+    let card;
+    try { card = decodeCard(msg.card); } catch { return; }
+    stopPairing(); // the code works once
+    try {
+      const c = await addPaired(card);
+      await publish(ch.topic, { t: 'pair-ack', card: myCard, n: msg.n }, ch.aes);
+      showAddMessage(`Paired with ${c.name}.`);
+      renderAll();
+    } catch (err) { showAddMessage(err.message, true); }
+  }, nowSince());
+}
+
+// The other side: enter the code, send my card, wait for theirs.
+async function joinWithCode(code) {
+  showAddMessage('Connecting…');
+  const ch = await pairChannel(code);
+  // Only an answer to this very request counts, not an older answer to someone else's (a spent code).
+  const nonce = b64u.enc(crypto.getRandomValues(new Uint8Array(12)));
+  let done;
+  const answered = new Promise((resolve) => { done = resolve; });
+  relay.subscribe(ch.topic, async (text) => {
+    const msg = await open(ch.aes, text);
+    if (msg?.t !== 'pair-ack' || msg.n !== nonce) return; // my own hello echoed back, or an old answer
+    try { done(decodeCard(msg.card)); } catch { /* ignore a broken card */ }
+  }, nowSince());
+  try {
+    if (!(await publish(ch.topic, { t: 'pair-hello', card: encodeCard(cardOf(state.identity)), n: nonce }, ch.aes))) {
+      throw new Error('Couldn’t reach the rendezvous server. Try again.');
+    }
+    const card = await Promise.race([answered, new Promise((r) => setTimeout(() => r(null), 45_000))]);
+    if (!card) throw new Error('No answer. Check the code (it works once, for 10 minutes) and that they are still waiting.');
+    const c = await addPaired(card);
+    showAddMessage(`Paired with ${c.name}.`);
+    renderAll();
+  } finally {
+    relay.unsubscribe(ch.topic);
+  }
 }
 
 async function acceptRequest(id) {
@@ -728,7 +913,7 @@ function renderContacts() {
   }
   const all = Object.values(state.contacts).filter((c) => c.status !== 'request').sort((a, b) => label(a).localeCompare(label(b)));
   if (!all.length) {
-    list.innerHTML = '<li class="muted empty">No contacts yet. Share your invite link, or paste someone else’s link above.</li>';
+    list.innerHTML = '<li class="muted empty">No contacts yet. Tap “Pair with a code” and tell them the code, or enter the code they give you.</li>';
     return;
   }
   const kept = takeOpenWheel(); // the open wheel is carried across the redraw, so it keeps its place and focus
@@ -746,6 +931,7 @@ function renderContacts() {
     else if (visibleNow) status = 'Live';
     else if (!seeingThem(c)) status = 'Hidden by them';
     else status = c.pos ? 'Last position is old' : 'No position yet';
+    status += links.get(c.id)?.open ? ' · direct' : ' · via server';
     const lock = c.adminOverMe ? '<span class="chip lock">Admin set · locked</span>' : '';
     const adminBtn = c.adminOverMe ? '' :
       `<button class="ghost" data-act="admin" data-id="${id}" data-on="${!c.youAdminThem}">${c.youAdminThem ? 'Remove my admin' : 'Make me admin'}</button>`;
@@ -896,6 +1082,7 @@ async function onListClick(e) {
         if (c.status === 'active' && !canRemoveContact(c)) return setStatus('An admin has set this. Only they can change it.');
         if (!confirm(`Remove ${c.name}?`)) return;
         if (channels.has(c.id)) { relay.unsubscribe(channels.get(c.id).topic); channels.delete(c.id); }
+        closeLink(c.id);
         delete state.contacts[c.id];
         clearTrail(c.id);
         setFollow(contactRemoved(follow, c.id)); // never keep following someone who is gone
@@ -1074,6 +1261,8 @@ async function startApp() {
   }
   renderAll();
   setInterval(() => { renderContacts(); renderMarkers(); renderTraces(); }, 15_000);
+  window.addEventListener('online', onNetworkBack);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') onNetworkBack(); });
   consumeInviteFromUrl();
 }
 
@@ -1111,9 +1300,24 @@ function wire() {
     const out = $('#add-error');
     out.hidden = true; out.classList.add('error');
     try {
-      await addContactFromCode($('#add-code').value);
+      const raw = $('#add-code').value;
+      const pairCode = normalizePairCode(raw);
+      if (pairCode) {
+        $('#add-code').value = '';
+        await joinWithCode(pairCode);
+        return;
+      }
+      await addContactFromCode(raw);
       $('#add-code').value = '';
-    } catch (err) { out.hidden = false; out.textContent = err.message; }
+    } catch (err) { showAddMessage(err.message, true); }
+  });
+
+  $('#pair-new').addEventListener('click', () => startPairing().catch((err) => { stopPairing(); showAddMessage(err.message, true); }));
+  $('#pair-cancel').addEventListener('click', () => stopPairing());
+  $('#pair-copy').addEventListener('click', async () => {
+    if (!pairing) return;
+    try { await navigator.clipboard.writeText(pairing.code); setStatus('Code copied'); }
+    catch { prompt('Copy the code:', pairing.code); }
   });
 
   $('#copy-link').addEventListener('click', async () => {
