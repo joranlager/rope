@@ -23,6 +23,25 @@ own ntfy server under **Me → Rendezvous server**. Everyone in a circle must us
 
 1. **Identity.** On first run your browser creates two keys (ECDH for pairing, ECDSA for signing)
    and stores them in `localStorage`. Nothing is uploaded.
+
+**Pairing with a code** (the simple way, after BeamBridge). One person taps **People → Pair with a
+code** and gets a code like `37-48219305`; the other types it into the same field where links are
+pasted and taps **Add**. Both are contacts straight away: knowing the code is the consent, so there
+is no accept step. The code works **once**, for **10 minutes**.
+
+- The code is the only secret. Both phones turn it into the same rendezvous topic and AES-GCM key
+  with a deliberately slow derivation (PBKDF2-SHA-256, 600 000 rounds, then HKDF), and swap their
+  contact cards (name and public keys) sealed with that key. Then pairing continues as in step 4.
+- The person who enters the code sends a random nonce and only accepts the answer that quotes it,
+  so an old answer for a spent code is never taken for a new one.
+- Security, compared with BeamBridge: BeamBridge runs a PAKE (SPAKE2) over magic-wormhole, so a
+  wrong guess burns the code and nobody can test codes offline. Browsers have no PAKE built in, so
+  Rope relies on the code being unguessable for its 10 minutes: 10 digits (10^10 codes) times
+  600 000 rounds each is far more than anyone can try in that time, the rendezvous server only sees
+  a topic derived from the code, and once pairing is over nothing secret remains (the cards hold
+  public keys only). Give the code only to the person you mean, over a channel you trust.
+
+**Pairing with an invite link** (still there, under the code):
 2. **Invite.** *Copy my invite link* gives a reusable link (`…#c=<card>`). The card holds your name
    and public keys. The part after `#` is never sent to a web server.
 3. **Request.** The person who opens the link sends a request to your inbox topic on the

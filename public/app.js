@@ -2,6 +2,7 @@ import { haversineM, formatMetres, elevationGainLoss } from './geo.js';
 import {
   newIdentity, loadKeys, cardOf, encodeCard, decodeCard, fingerprint, inboxTopic,
   deriveSecret, channelFromSecret, seal, open, signObj, verifyObj,
+  newPairCode, normalizePairCode, pairChannel, PAIR_CODE_TTL_MS, b64u,
 } from './crypto.js';
 import { Relay, DEFAULT_RELAY } from './net.js';
 import { PeerLink, SIGNAL_MAX_AGE_MS } from './p2p.js';
@@ -757,6 +758,108 @@ async function addContactFromCode(raw) {
   renderAll();
 }
 
+// ---------- pairing with a one-time code (after BeamBridge) ----------
+// The person who asks for a code listens on the code's topic; the other enters the code and sends
+// their card there, sealed with the code's key. The listener adds them, answers with its own card,
+// and the code is spent. Both sides are then contacts straight away: knowing the code is the consent.
+
+let pairing = null; // { code, topic, expires, timer, tick } while I'm showing a code
+const nowSince = () => String(Math.floor(Date.now() / 1000) - 5); // only messages from now on
+
+function stopPairing(text) {
+  if (!pairing) return;
+  relay.unsubscribe(pairing.topic);
+  clearTimeout(pairing.timer);
+  clearInterval(pairing.tick);
+  pairing = null;
+  $('#pair-show').hidden = true;
+  $('#pair-new').hidden = false;
+  if (text) showAddMessage(text);
+}
+
+function showAddMessage(text, isError = false) {
+  const out = $('#add-error');
+  out.hidden = false;
+  out.classList.toggle('error', isError);
+  out.textContent = text;
+}
+
+// Adds (or re-activates) the person behind a card received over a pairing code.
+async function addPaired(card) {
+  const id = await fingerprint(card.e);
+  if (id === state.identity.id) throw new Error('That is your own code');
+  const existing = state.contacts[id];
+  if (existing?.status === 'active') return existing;
+  const c = { ...(existing ?? {}), id, name: card.n, e: card.e, s: card.s, status: 'pending' };
+  state.contacts[id] = c;
+  await activate(c);
+  return c;
+}
+
+async function startPairing() {
+  stopPairing();
+  $('#add-error').hidden = true;
+  const code = newPairCode();
+  $('#pair-new').hidden = true;
+  $('#pair-show').hidden = false;
+  $('#pair-code').textContent = code;
+  $('#pair-wait').textContent = 'Getting ready…';
+  const ch = await pairChannel(code);
+  const expires = Date.now() + PAIR_CODE_TTL_MS;
+  const myCard = encodeCard(cardOf(state.identity));
+  pairing = {
+    code, topic: ch.topic, expires,
+    timer: setTimeout(() => stopPairing('The code expired. Get a new one when you’re ready.'), PAIR_CODE_TTL_MS),
+    tick: setInterval(() => {
+      const left = Math.max(0, Math.ceil((expires - Date.now()) / 60_000));
+      $('#pair-wait').textContent = `Waiting for them to enter it… (${left} min left)`;
+    }, 15_000),
+  };
+  $('#pair-wait').textContent = 'Waiting for them to enter it… (10 min left)';
+  const mine = pairing;
+  relay.subscribe(ch.topic, async (text) => {
+    if (pairing !== mine) return;
+    const msg = await open(ch.aes, text);
+    if (msg?.t !== 'pair-hello' || typeof msg.n !== 'string') return; // my own answer echoed back, or noise
+    let card;
+    try { card = decodeCard(msg.card); } catch { return; }
+    stopPairing(); // the code works once
+    try {
+      const c = await addPaired(card);
+      await publish(ch.topic, { t: 'pair-ack', card: myCard, n: msg.n }, ch.aes);
+      showAddMessage(`Paired with ${c.name}.`);
+      renderAll();
+    } catch (err) { showAddMessage(err.message, true); }
+  }, nowSince());
+}
+
+// The other side: enter the code, send my card, wait for theirs.
+async function joinWithCode(code) {
+  showAddMessage('Connecting…');
+  const ch = await pairChannel(code);
+  // Only an answer to this very request counts, not an older answer to someone else's (a spent code).
+  const nonce = b64u.enc(crypto.getRandomValues(new Uint8Array(12)));
+  let done;
+  const answered = new Promise((resolve) => { done = resolve; });
+  relay.subscribe(ch.topic, async (text) => {
+    const msg = await open(ch.aes, text);
+    if (msg?.t !== 'pair-ack' || msg.n !== nonce) return; // my own hello echoed back, or an old answer
+    try { done(decodeCard(msg.card)); } catch { /* ignore a broken card */ }
+  }, nowSince());
+  try {
+    if (!(await publish(ch.topic, { t: 'pair-hello', card: encodeCard(cardOf(state.identity)), n: nonce }, ch.aes))) {
+      throw new Error('Couldn’t reach the rendezvous server. Try again.');
+    }
+    const card = await Promise.race([answered, new Promise((r) => setTimeout(() => r(null), 45_000))]);
+    if (!card) throw new Error('No answer. Check the code (it works once, for 10 minutes) and that they are still waiting.');
+    const c = await addPaired(card);
+    showAddMessage(`Paired with ${c.name}.`);
+    renderAll();
+  } finally {
+    relay.unsubscribe(ch.topic);
+  }
+}
+
 async function acceptRequest(id) {
   const c = state.contacts[id];
   await activate(c);
@@ -810,7 +913,7 @@ function renderContacts() {
   }
   const all = Object.values(state.contacts).filter((c) => c.status !== 'request').sort((a, b) => label(a).localeCompare(label(b)));
   if (!all.length) {
-    list.innerHTML = '<li class="muted empty">No contacts yet. Share your invite link, or paste someone else’s link above.</li>';
+    list.innerHTML = '<li class="muted empty">No contacts yet. Tap “Pair with a code” and tell them the code, or enter the code they give you.</li>';
     return;
   }
   const kept = takeOpenWheel(); // the open wheel is carried across the redraw, so it keeps its place and focus
@@ -1197,9 +1300,24 @@ function wire() {
     const out = $('#add-error');
     out.hidden = true; out.classList.add('error');
     try {
-      await addContactFromCode($('#add-code').value);
+      const raw = $('#add-code').value;
+      const pairCode = normalizePairCode(raw);
+      if (pairCode) {
+        $('#add-code').value = '';
+        await joinWithCode(pairCode);
+        return;
+      }
+      await addContactFromCode(raw);
       $('#add-code').value = '';
-    } catch (err) { out.hidden = false; out.textContent = err.message; }
+    } catch (err) { showAddMessage(err.message, true); }
+  });
+
+  $('#pair-new').addEventListener('click', () => startPairing().catch((err) => { stopPairing(); showAddMessage(err.message, true); }));
+  $('#pair-cancel').addEventListener('click', () => stopPairing());
+  $('#pair-copy').addEventListener('click', async () => {
+    if (!pairing) return;
+    try { await navigator.clipboard.writeText(pairing.code); setStatus('Code copied'); }
+    catch { prompt('Copy the code:', pairing.code); }
   });
 
   $('#copy-link').addEventListener('click', async () => {
