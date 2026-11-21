@@ -10,6 +10,14 @@
   "scripts": {
     "start": "node scripts/serve.mjs",
     "build": "node scripts/build.mjs",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "vendor": "node scripts/vendor.mjs"
+  },
+  "devDependencies": {
+    "@noble/curves": "1.9.7",
+    "@noble/hashes": "1.8.0",
+    "esbuild": "0.25.10",
+    "jsqr": "1.4.0",
+    "qrcode-generator": "1.4.4"
   }
 }

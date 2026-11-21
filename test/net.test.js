@@ -73,3 +73,21 @@ test('reconnect reopens closed streams from the last message id', () => {
   assert.deepEqual(got, ['hi', 'again']);
   r.closeAll();
 });
+
+test('pause closes a stream and resume picks up from before the pause', () => {
+  FakeES.all = [];
+  const r = new Relay('https://r', { EventSourceImpl: FakeES });
+  r.subscribe('top', () => {}, '5m');
+  FakeES.all[0].onopen();
+  assert.equal(r.streamState('top'), 'open');
+  r.pause('top');
+  assert.equal(FakeES.all[0].readyState, 2);
+  assert.equal(r.streamState('top'), 'paused');
+  r.reconnect(); // a paused stream stays paused
+  assert.equal(FakeES.all.length, 1);
+  r.resume('top');
+  assert.equal(FakeES.all.length, 2);
+  assert.match(FakeES.all[1].url, /since=\d{10}$/);
+  assert.equal(r.streamState('top'), 'connecting');
+  r.closeAll();
+});

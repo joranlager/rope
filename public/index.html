@@ -54,9 +54,15 @@
       <button class="menu-btn" data-tab="me" aria-pressed="false">Me</button>
       <button id="menu-all" class="menu-btn" data-action="all" aria-pressed="false" title="Show everyone on the map">All</button>
     </nav>
-    <div id="status" class="status" role="status" aria-live="polite" data-tone="idle"><i class="status-dot" aria-hidden="true"></i><span id="status-text" class="status-text">Starting…</span></div>
+    <div id="status" class="status" role="status" aria-live="polite" data-tone="idle" data-conn="idle"><i class="status-dot" aria-hidden="true"></i><span id="status-text" class="status-text">Starting…</span></div>
   </header>
   <div id="toast" class="toast" role="status" hidden></div>
+  <div id="scan" class="scan" hidden>
+    <video id="scan-video" playsinline muted autoplay></video>
+    <div class="scan-frame" aria-hidden="true"></div>
+    <p>Point the camera at the code on the other phone</p>
+    <button id="scan-cancel" class="tinted" type="button">Cancel</button>
+  </div>
 
   <!-- Two follow arrows. Left: follow me, in my colour. Right: follow the person chosen with Show,
        in that person's colour. Filled while following, outlined otherwise. -->
@@ -108,22 +114,20 @@
 
     <!-- People -->
     <section id="tab-people" class="tabpanel">
-      <button id="pair-new" class="primary wide">Pair with a code</button>
+      <button id="pair-new" class="primary wide">Show a pairing code</button>
       <div id="pair-show" class="pair-show" hidden>
-        <p class="muted small">Tell the other person this code. It works once, for 10 minutes.</p>
+        <p class="muted small">Let the other person scan this, or read the number to them (in person or on the phone). It works once, for 10 minutes.</p>
+        <div id="pair-qr" class="pair-qr" role="img" aria-label="Pairing code as a QR code"></div>
         <div id="pair-code" class="pair-code" aria-live="polite"></div>
-        <div class="row">
-          <button id="pair-copy" class="tinted" type="button">Copy</button>
-          <button id="pair-cancel" class="ghost" type="button">Cancel</button>
-        </div>
-        <p id="pair-wait" class="muted small">Waiting for them to enter it…</p>
+        <div class="row"><button id="pair-cancel" class="ghost" type="button">Cancel</button></div>
+        <p id="pair-wait" class="muted small">Waiting for them…</p>
       </div>
+      <button id="pair-scan" class="tinted wide" type="button">Scan their code</button>
       <form id="add-form" class="row">
-        <input id="add-code" placeholder="Enter a code, or paste an invite link" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Pairing code or invite link">
-        <button type="submit" class="tinted">Add</button>
+        <input id="add-code" placeholder="…or type their number" inputmode="numeric" autocomplete="off" spellcheck="false" aria-label="Pairing code (10 digits)">
+        <button type="submit" class="tinted">Pair</button>
       </form>
       <p id="add-error" class="error" hidden></p>
-      <button id="copy-link" class="ghost wide">Copy my invite link instead</button>
       <ul id="requests" class="contacts requests" hidden></ul>
       <ul id="contacts" class="contacts"></ul>
     </section>

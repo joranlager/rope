@@ -3,7 +3,10 @@
 // Contact fields used here:
 //   theirVisible  the contact says they are sharing their position
 //   youAdminThem  I hold admin rights over them (I see them even if they hide)
-//   adminOverMe   they hold a verified, signed admin grant over me
+//   adminOverMe   they are my admin: they asked (signed) and I approved (signed)
+//   adminAsk      ts of their signed request to become my admin, waiting for my answer
+//   adminReq      { ts, sig } my own signed request to become their admin, waiting for their answer
+//   hw            { [type]: ts } newest message seen per type (replay protection, kept across reloads)
 //   pos           { lat, lon, acc, ts } last position received
 
 export const STALE_MS = 5 * 60 * 1000;
@@ -47,26 +50,66 @@ export function applyPairMessage(contact, msg, { now = Date.now(), adminVerified
       if (!validCoord(lat, lon) || !Number.isFinite(ts)) return {};
       if (Math.abs(now - ts) > MAX_SKEW_MS) return {};
       if (contact.pos && ts <= contact.pos.ts) return {}; // replayed or out-of-order
-      return { pos: { lat, lon, acc: Number.isFinite(msg.acc) ? msg.acc : null, ts } };
+      if (!fresh(contact, { ...msg, t: 'pos' }, now)) return {}; // older than one seen before a reload
+      return { pos: { lat, lon, acc: Number.isFinite(msg.acc) ? msg.acc : null, ts }, hw: { ...contact.hw, pos: ts } };
     }
     case 'vis': {
+      if (!fresh(contact, msg, now)) return {};
       const theirVisible = msg.v === true;
-      return theirVisible || contact.youAdminThem ? { theirVisible } : { theirVisible, pos: null };
+      const patch = theirVisible || contact.youAdminThem ? { theirVisible } : { theirVisible, pos: null };
+      return { ...patch, hw: { ...contact.hw, vis: Number(msg.ts) } };
     }
     case 'admin': {
+      // A request (on) or a release (off) from someone who wants to be, or is, my admin.
+      // A request never gives rights by itself: it waits for my approval.
       if (!adminVerified) return {};
       const ts = Number(msg.ts);
-      if (contact.adminTs && ts <= contact.adminTs) return {}; // stale or replayed grant
-      return { adminOverMe: msg.on === true, adminTs: ts };
+      // No age limit: a request is re-sent until answered, perhaps days later. Replays are caught by
+      // adminTs, which is set to the request's time when I approve or decline it.
+      if (!Number.isFinite(ts)) return {};
+      if (contact.adminTs && ts <= contact.adminTs) return {}; // already answered, stale or replayed
+      if (contact.adminAsk && ts <= contact.adminAsk) return {};
+      if (msg.on !== true) return { adminOverMe: false, adminAsk: null, adminTs: ts };
+      return contact.adminOverMe ? {} : { adminAsk: ts };
+    }
+    case 'adminok': {
+      // Their answer to my request; signed by them over the request's timestamp.
+      if (!adminVerified || !contact.adminReq || Number(msg.req) !== contact.adminReq.ts) return {};
+      return msg.ok === true ? { youAdminThem: true, adminReq: null } : { youAdminThem: false, adminReq: null, adminDeclined: Number(msg.req) };
     }
     default:
       return {};
   }
 }
 
-/** The part of an admin message that is signed. */
+/** The part of an admin request or release that the requester signs. */
 export function adminPayload(on, ts) {
   return { t: 'admin', on: Boolean(on), ts };
+}
+
+/** The part of an answer to an admin request that the subject signs. */
+export function adminAnswerPayload(ok, req) {
+  return { t: 'adminok', ok: Boolean(ok), req };
+}
+
+// Replay protection: a message must be recent and newer than the last one of its type, which is
+// remembered across reloads (contact.hw), so the relay can't replay old ciphertext to us.
+function fresh(contact, msg, now) {
+  const ts = Number(msg.ts);
+  if (!Number.isFinite(ts) || Math.abs(now - ts) > MAX_SKEW_MS) return false;
+  return !(contact.hw?.[msg.t] >= ts);
+}
+
+/**
+ * Contacts saved by versions where admin rights didn't need consent: a grant I never approved
+ * becomes a request for me to answer, and my own unconfirmed grant becomes a pending request.
+ */
+export function migrateAdmin(contact) {
+  if (contact.adminConsent === 2) return {};
+  const patch = { adminConsent: 2 };
+  if (contact.adminOverMe) Object.assign(patch, { adminOverMe: false, adminAsk: contact.adminTs ?? Date.now() });
+  if (contact.youAdminThem === true) Object.assign(patch, { youAdminThem: false, adminReask: true });
+  return patch;
 }
 
 export function isStale(pos, now = Date.now()) {

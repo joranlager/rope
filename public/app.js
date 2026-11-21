@@ -1,9 +1,9 @@
 import { haversineM, formatMetres, elevationGainLoss } from './geo.js';
 import {
-  newIdentity, loadKeys, cardOf, encodeCard, decodeCard, fingerprint, inboxTopic,
+  newIdentity, loadKeys, cardOf, encodeCard, decodeCard, fingerprint,
   deriveSecret, channelFromSecret, seal, open, signObj, verifyObj,
-  newPairCode, normalizePairCode, pairChannel, PAIR_CODE_TTL_MS, b64u,
 } from './crypto.js';
+import { newCode, parseCode, qrText, pairTopic, PakeHost, PakeJoiner, CODE_TTL_MS } from './pake.js';
 import { Relay, DEFAULT_RELAY } from './net.js';
 import { PeerLink, SIGNAL_MAX_AGE_MS } from './p2p.js';
 import { debugLog, logger, DebugOverlay, tapCounter, ago } from './debug.js';
@@ -20,7 +20,7 @@ import {
 } from './trace.js';
 import {
   shouldSendPosition, theyCanSeeMe, seeingThem, canRemoveContact,
-  applyPairMessage, adminPayload, isStale,
+  applyPairMessage, adminPayload, adminAnswerPayload, migrateAdmin, isStale,
 } from './social.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -49,7 +49,7 @@ const SEND_DIRECT_MS = 3_000;   // over a direct (peer-to-peer) link: no limit b
 
 // ---------- local state ----------
 // state = { identity, visible, relay, contacts: { [id]: contact } }
-// contact = { id, name, e, s, status: 'pending'|'request'|'active', nick, secret,
+// contact = { id, name, e, s, status: 'pending'|'active', nick, secret, hw, adminAsk, adminReq, adminAnswer,
 //             theirVisible, youAdminThem, adminOverMe, adminTs, adminTouched, pos }
 let state = null;
 let keys = null;                 // imported private keys
@@ -65,7 +65,13 @@ let terrainFor = null, terrainAt = 0;
 function loadState() {
   try {
     const s = JSON.parse(localStorage.getItem(STORE_KEY));
-    return s?.identity ? s : null;
+    if (!s?.identity) return null;
+    for (const [id, c] of Object.entries(s.contacts ?? {})) {
+      // Invite-link requests and unanswered invites are gone with the invite link: pair with a code.
+      if (c.status !== 'active') { delete s.contacts[id]; continue; }
+      Object.assign(c, migrateAdmin(c)); // admin rights now need the subject's approval
+    }
+    return s;
   } catch { return null; }
 }
 function saveState() {
@@ -636,23 +642,65 @@ async function publish(topic, obj, aes) {
   }
 }
 
-// Every pair message carries my id: the relay echoes my own messages back on the shared topic,
-// and without it they would be taken for the contact's.
-// Positions go over the direct link when it is open, else over the relay. Everything else goes over
-// the relay too (the relay keeps it a while for a phone that is offline right now).
+// Every pair message carries my id (the relay echoes my own messages back on the shared topic) and
+// a timestamp (replay protection). While the direct link is open, everything goes over it and the
+// relay is not used at all: its stream is paused. Only when there is no direct link do messages go
+// through the relay, sealed with the pair key, and the direct link is re-established through it.
 async function sendPair(c, obj) {
   const ch = channels.get(c.id);
   if (!ch) return true;
-  const msg = { ...obj, fr: state.identity.id };
+  const msg = { ts: Date.now(), ...obj, fr: state.identity.id };
   const link = links.get(c.id);
   const t = trafficOf(c.id);
-  if (link?.open && link.send(await seal(ch.aes, msg))) {
+  if (obj.t !== 'rtc' && link?.open && link.send(await seal(ch.aes, msg))) {
     t.txDirect++;
-    if (obj.t === 'pos') return true;
+    return true;
   }
   if (obj.t === 'pos' && Date.now() < relayPausedUntil) return false;
   t.txRelay++;
   return publish(ch.topic, msg, ch.aes);
+}
+
+// Sends my current state to a contact over whatever path is in use now: on pairing, when the direct
+// link opens and when it falls back to the relay (the other side may have missed something).
+async function syncContact(c) {
+  await sendPair(c, { t: 'vis', v: state.visible });
+  await resendAdmin(c);
+  lastSentTo.delete(c.id);
+  maybeSendPosition();
+}
+
+// ---------- admin rights, with the subject's consent ----------
+// The would-be admin sends a signed request. The subject's app shows it and only an approval
+// (signed by the subject, over the request) makes it count. Requests, answers and releases are
+// stored and re-sent until delivered, so it works even if the other phone is offline for a while.
+
+async function requestAdmin(c, on) {
+  const ts = Date.now();
+  const obj = adminPayload(on, ts);
+  const sig = await signObj(keys.ecdsa, obj);
+  if (on) Object.assign(c, { adminReq: { ts, sig }, adminRelease: null, adminDeclined: null });
+  else Object.assign(c, { adminReq: null, youAdminThem: false, adminRelease: { ts, sig } });
+  saveState();
+  await sendPair(c, { ...obj, sig });
+}
+
+async function answerAdmin(c, ok) {
+  const req = c.adminAsk;
+  if (!req) return;
+  const obj = adminAnswerPayload(ok, req);
+  const sig = await signObj(keys.ecdsa, obj);
+  Object.assign(c, { adminAsk: null, adminTs: req, adminAnswer: { ok, req, sig } });
+  if (ok) c.adminOverMe = true;
+  saveState();
+  await sendPair(c, { ...obj, sig });
+}
+
+async function resendAdmin(c) {
+  if (c.adminReask) { c.adminReask = false; await requestAdmin(c, true); return; } // from before consent
+  if (c.adminReq) await sendPair(c, { ...adminPayload(true, c.adminReq.ts), sig: c.adminReq.sig });
+  if (c.adminRelease) await sendPair(c, { ...adminPayload(false, c.adminRelease.ts), sig: c.adminRelease.sig });
+  if (c.adminAnswer) await sendPair(c, { ...adminAnswerPayload(c.adminAnswer.ok, c.adminAnswer.req), sig: c.adminAnswer.sig });
 }
 
 function maybeSendPosition(force = false) {
@@ -686,8 +734,14 @@ function openLink(c) {
     onMessage: (text) => onPairMessage(c.id, text, 'direct'),
     log: logger(`p2p ${c.name}`),
     onChange: (isOpen) => {
-      if (isOpen) { lastSentTo.delete(c.id); maybeSendPosition(); } // a direct link is up: send at once
+      // Direct link up: stop using the relay for this contact. Down: listen on the relay again,
+      // send through it, and let the link re-establish itself through it.
+      const ch = channels.get(c.id);
+      if (ch) { if (isOpen) relay.pause(ch.topic); else relay.resume(ch.topic); }
+      if (!isOpen) linkLostAt.set(c.id, Date.now());
+      syncContact(c);
       renderContacts();
+      renderConn();
     },
   });
   links.set(c.id, link);
@@ -698,11 +752,6 @@ function closeLink(id) {
   links.get(id)?.close();
   links.delete(id);
   lastSentTo.delete(id);
-}
-
-async function sendAdminState(c) {
-  const obj = adminPayload(c.youAdminThem === true, Date.now());
-  await sendPair(c, { ...obj, sig: await signObj(keys.ecdsa, obj) });
 }
 
 async function openChannel(c) {
@@ -728,9 +777,16 @@ async function onPairMessage(id, text, via = 'relay') {
   let adminVerified = false;
   if (msg.t === 'admin') {
     adminVerified = await verifyObj(c.s, adminPayload(msg.on, msg.ts), msg.sig);
+    // A request I already answered, sent again: they may have missed my answer.
+    if (adminVerified && msg.on === true && c.adminAnswer?.req === Number(msg.ts)) await resendAdmin(c);
+  } else if (msg.t === 'adminok') {
+    adminVerified = await verifyObj(c.s, adminAnswerPayload(msg.ok, Number(msg.req)), msg.sig);
   }
   const patch = applyPairMessage(c, msg, { adminVerified });
   if (!Object.keys(patch).length) return;
+  if (patch.adminAsk) showToast(`${label(c)} asks to be your admin. See People.`);
+  if ('youAdminThem' in patch) showToast(patch.youAdminThem ? `${label(c)} approved: you are now their admin.` : `${label(c)} declined your admin request.`);
+  if (msg.t === 'admin' && msg.on !== true && patch.adminOverMe === false) c.adminAnswer = null; // released
   Object.assign(c, patch);
   if (patch.pos) recordTrail(id, { lat: patch.pos.lat, lon: patch.pos.lon, ts: patch.pos.ts });
   if ('theirVisible' in patch && !seeingThem(c)) clearTrail(id); // they stopped sharing: their trail goes too
@@ -743,68 +799,31 @@ async function activate(c) {
   c.status = 'active';
   await openChannel(c);
   saveState();
-  await sendPair(c, { t: 'vis', v: state.visible });
-  if (c.adminTouched) await sendAdminState(c);
-  lastSentTo.delete(c.id);
-  maybeSendPosition(); // a new contact sees me straight away, not at my next GPS fix
+  await syncContact(c); // a new contact sees me straight away, not at my next GPS fix
   renderAll();
 }
 
-async function onInboxMessage(text) {
-  let msg;
-  try { msg = JSON.parse(text); } catch { return; }
-  if (!msg || (msg.t !== 'hello' && msg.t !== 'ack')) return;
-  let card;
-  try { card = decodeCard(typeof msg.card === 'string' ? msg.card : ''); } catch { return; }
-  const id = await fingerprint(card.e);
-  if (id === state.identity.id) return;
-  const c = state.contacts[id];
-  if (c?.status === 'active') return;
-  if (c?.status === 'pending') {
-    Object.assign(c, { name: card.n, e: card.e, s: card.s });
-    await activate(c);
-    if (msg.t === 'hello') await publish(await inboxTopic(card.e), { t: 'ack', card: encodeCard(cardOf(state.identity)) });
-    return;
-  }
-  if (msg.t === 'ack') return; // an ack is only meaningful for a request we made
-  state.contacts[id] = { id, name: card.n, e: card.e, s: card.s, status: 'request' };
-  saveState();
-  renderAll();
-}
+// ---------- pairing with a number (QR code or read aloud), made safe by a PAKE ----------
+// One person shows a code (digits and a QR code). The other scans it or types it in. A PAKE
+// (CPace, see pake.js) over the relay turns the code into a shared key, which carries both
+// contact cards; then the usual per-contact key (ECDH) takes over. The relay can't learn the code
+// or try codes offline; each wrong guess needs a live exchange and the code dies after 3 tries.
 
-async function addContactFromCode(raw) {
-  let code = String(raw).trim();
-  const m = /[#&]c=([A-Za-z0-9_-]+)/.exec(code);
-  if (m) code = m[1];
-  const card = decodeCard(code);
-  const id = await fingerprint(card.e);
-  if (id === state.identity.id) throw new Error('That is your own code');
-  const existing = state.contacts[id];
-  if (existing?.status === 'active') throw new Error(`${existing.name} is already a contact`);
-  state.contacts[id] = { ...(existing ?? {}), id, name: card.n, e: card.e, s: card.s, status: existing?.status === 'request' ? 'request' : 'pending' };
-  saveState();
-  if (state.contacts[id].status === 'request') await acceptRequest(id);
-  else await publish(await inboxTopic(card.e), { t: 'hello', card: encodeCard(cardOf(state.identity)) });
-  renderAll();
-}
-
-// ---------- pairing with a one-time code (after BeamBridge) ----------
-// The person who asks for a code listens on the code's topic; the other enters the code and sends
-// their card there, sealed with the code's key. The listener adds them, answers with its own card,
-// and the code is spent. Both sides are then contacts straight away: knowing the code is the consent.
-
-let pairing = null; // { code, topic, expires, timer, tick } while I'm showing a code
+let pairing = null; // { code, topic, expires, timer, tick, host } while I'm showing a code
 const nowSince = () => String(Math.floor(Date.now() / 1000) - 5); // only messages from now on
 
-function stopPairing(text) {
+function stopPairing(text, isError = false) {
   if (!pairing) return;
-  relay.unsubscribe(pairing.topic);
-  clearTimeout(pairing.timer);
-  clearInterval(pairing.tick);
-  pairing = null;
+  const { host, topic } = pairing;
+  pairing = null; // first, so the host's rejection below isn't reported again
+  host.cancel();
+  relay.unsubscribe(topic);
+  clearTimeout(host.timer);
+  clearInterval(host.tick);
   $('#pair-show').hidden = true;
   $('#pair-new').hidden = false;
-  if (text) showAddMessage(text);
+  $('#pair-qr').innerHTML = '';
+  if (text) showAddMessage(text, isError);
 }
 
 function showAddMessage(text, isError = false) {
@@ -814,90 +833,173 @@ function showAddMessage(text, isError = false) {
   out.textContent = text;
 }
 
-// Adds (or re-activates) the person behind a card received over a pairing code.
+// Adds (or re-activates) the person behind a card received through the PAKE.
 async function addPaired(card) {
   const id = await fingerprint(card.e);
   if (id === state.identity.id) throw new Error('That is your own code');
   const existing = state.contacts[id];
   if (existing?.status === 'active') return existing;
-  const c = { ...(existing ?? {}), id, name: card.n, e: card.e, s: card.s, status: 'pending' };
+  const c = { ...(existing ?? {}), id, name: card.n, e: card.e, s: card.s, status: 'pending', adminConsent: 2 };
   state.contacts[id] = c;
   await activate(c);
   return c;
 }
 
+// The relay as the PAKE's transport: plain JSON (it holds only public values, MACs and ciphertext).
+function pakeTransport(topic, party) {
+  relay.subscribe(topic, (text) => {
+    let m;
+    try { m = JSON.parse(text); } catch { return; }
+    party.handle(m).catch((err) => log.pair('warn', `bad message: ${err.message}`));
+  }, nowSince());
+}
+const pakeSend = (topic) => async (obj) => {
+  if (!(await publish(topic, obj))) throw new Error('Couldn’t reach the rendezvous server. Try again.');
+};
+
 async function startPairing() {
   stopPairing();
   $('#add-error').hidden = true;
-  const code = newPairCode();
+  const code = newCode();
+  const topic = pairTopic(code);
+  const host = new PakeHost({ code, card: { card: encodeCard(cardOf(state.identity)) }, send: pakeSend(topic) });
+  const expires = Date.now() + CODE_TTL_MS;
+  pairing = { code: code.code, topic, expires, host };
+  host.timer = setTimeout(() => stopPairing('The code expired. Show a new one when you’re ready.'), CODE_TTL_MS);
+  host.tick = setInterval(() => {
+    $('#pair-wait').textContent = `Waiting for them… (${Math.max(0, Math.ceil((expires - Date.now()) / 60_000))} min left)`;
+  }, 15_000);
   $('#pair-new').hidden = true;
   $('#pair-show').hidden = false;
-  $('#pair-code').textContent = code;
-  $('#pair-wait').textContent = 'Getting ready…';
-  const ch = await pairChannel(code);
+  $('#pair-code').textContent = code.code;
+  $('#pair-wait').textContent = 'Waiting for them… (10 min left)';
+  const { default: qrcode } = await import('./vendor/qrcode.js');
+  const qr = qrcode(0, 'M');
+  qr.addData(qrText(code), 'Alphanumeric');
+  qr.make();
+  if (pairing?.host === host) $('#pair-qr').innerHTML = qr.createSvgTag({ cellSize: 6, margin: 3, scalable: true });
+  pakeTransport(topic, host);
   log.pair('info', 'showing a code, waiting for the other person');
-  const expires = Date.now() + PAIR_CODE_TTL_MS;
-  const myCard = encodeCard(cardOf(state.identity));
-  pairing = {
-    code, topic: ch.topic, expires,
-    timer: setTimeout(() => stopPairing('The code expired. Get a new one when you’re ready.'), PAIR_CODE_TTL_MS),
-    tick: setInterval(() => {
-      const left = Math.max(0, Math.ceil((expires - Date.now()) / 60_000));
-      $('#pair-wait').textContent = `Waiting for them to enter it… (${left} min left)`;
-    }, 15_000),
-  };
-  $('#pair-wait').textContent = 'Waiting for them to enter it… (10 min left)';
-  const mine = pairing;
-  relay.subscribe(ch.topic, async (text) => {
-    if (pairing !== mine) return;
-    const msg = await open(ch.aes, text);
-    if (msg?.t !== 'pair-hello' || typeof msg.n !== 'string') return; // my own answer echoed back, or noise
-    let card;
-    try { card = decodeCard(msg.card); } catch { return; }
+  host.done.then(async ({ card }) => {
     stopPairing(); // the code works once
-    log.pair('info', `code entered by ${card.n}`);
-    try {
-      const c = await addPaired(card);
-      await publish(ch.topic, { t: 'pair-ack', card: myCard, n: msg.n }, ch.aes);
-      showAddMessage(`Paired with ${c.name}.`);
-      renderAll();
-    } catch (err) { showAddMessage(err.message, true); }
-  }, nowSince());
+    const c = await addPaired(decodeCard(card));
+    log.pair('info', `paired with ${c.name}`);
+    showAddMessage(`Paired with ${c.name}.`);
+    renderAll();
+  }).catch((err) => {
+    if (pairing?.host !== host) return; // cancelled or expired: already handled
+    log.pair('warn', err.message);
+    stopPairing(err.message, true);
+  });
 }
 
-// The other side: enter the code, send my card, wait for theirs.
+// The other side: a scanned or typed code.
 async function joinWithCode(code) {
   showAddMessage('Connecting…');
-  const ch = await pairChannel(code);
+  const topic = pairTopic(code);
+  const joiner = new PakeJoiner({ code, card: { card: encodeCard(cardOf(state.identity)) }, send: pakeSend(topic) });
+  pakeTransport(topic, joiner);
   log.pair('info', 'joining with a code');
-  // Only an answer to this very request counts, not an older answer to someone else's (a spent code).
-  const nonce = b64u.enc(crypto.getRandomValues(new Uint8Array(12)));
-  let done;
-  const answered = new Promise((resolve) => { done = resolve; });
-  relay.subscribe(ch.topic, async (text) => {
-    const msg = await open(ch.aes, text);
-    if (msg?.t !== 'pair-ack' || msg.n !== nonce) return; // my own hello echoed back, or an old answer
-    try { done(decodeCard(msg.card)); } catch { /* ignore a broken card */ }
-  }, nowSince());
   try {
-    if (!(await publish(ch.topic, { t: 'pair-hello', card: encodeCard(cardOf(state.identity)), n: nonce }, ch.aes))) {
-      throw new Error('Couldn’t reach the rendezvous server. Try again.');
+    // A wrong code shows at once (the other phone's proof doesn't match), but wait a few seconds
+    // more in case that answer came from someone else pairing on the same 2-digit nameplate.
+    const wrong = new Promise((r) => { joiner.onWrongAnswer = () => setTimeout(() => r(null), 4_000); });
+    await joiner.start();
+    const res = await Promise.race([joiner.done, wrong, new Promise((r) => setTimeout(() => r(null), 45_000))]);
+    if (!res) {
+      log.pair('warn', joiner.wrongAnswers ? 'wrong code' : 'no answer to the code');
+      throw new Error(joiner.wrongAnswers
+        ? 'Wrong code. Check the digits, or ask them to show a new code.'
+        : 'No answer. Check the code (it works once, for 10 minutes) and that they are still showing it.');
     }
-    const card = await Promise.race([answered, new Promise((r) => setTimeout(() => r(null), 45_000))]);
-    if (!card) log.pair('warn', 'no answer to the code');
-    if (!card) throw new Error('No answer. Check the code (it works once, for 10 minutes) and that they are still waiting.');
-    const c = await addPaired(card);
+    const c = await addPaired(decodeCard(res.card));
+    log.pair('info', `paired with ${c.name}`);
     showAddMessage(`Paired with ${c.name}.`);
     renderAll();
   } finally {
-    relay.unsubscribe(ch.topic);
+    joiner.cancel();
+    relay.unsubscribe(topic);
   }
 }
 
-async function acceptRequest(id) {
-  const c = state.contacts[id];
-  await activate(c);
-  await publish(await inboxTopic(c.e), { t: 'ack', card: encodeCard(cardOf(state.identity)) });
+// ---------- scanning a code with the camera ----------
+let scan = null; // { stream, timer }
+
+async function startScan() {
+  stopScan();
+  if (!navigator.mediaDevices?.getUserMedia) throw new Error('This browser can’t use the camera. Type the number instead.');
+  const { default: jsQR } = await import('./vendor/jsqr.js');
+  const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+  const video = $('#scan-video');
+  video.srcObject = stream;
+  $('#scan').hidden = false;
+  await video.play().catch(() => {});
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  scan = { stream };
+  scan.timer = setInterval(() => {
+    if (!video.videoWidth) return;
+    const k = Math.min(1, 640 / Math.max(video.videoWidth, video.videoHeight));
+    canvas.width = Math.round(video.videoWidth * k);
+    canvas.height = Math.round(video.videoHeight * k);
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const found = jsQR(img.data, img.width, img.height, { inversionAttempts: 'attemptBoth' });
+    const code = found && parseCode(found.data);
+    if (!code) return;
+    stopScan();
+    if (navigator.vibrate) navigator.vibrate(30);
+    joinWithCode(code).catch((err) => showAddMessage(err.message, true));
+  }, 200);
+}
+
+function stopScan() {
+  if (!scan) return;
+  clearInterval(scan.timer);
+  for (const t of scan.stream.getTracks()) t.stop();
+  $('#scan-video').srcObject = null;
+  $('#scan').hidden = true;
+  scan = null;
+}
+
+// ---------- connection status (green: direct, orange: via relay, red: none) ----------
+
+const linkLostAt = new Map(); // contact id -> when its direct link went down
+const RELAY_GRACE_MS = 8_000; // the relay stream reopening after a lost link counts as "via relay"
+
+function connOf(c) {
+  if (links.get(c.id)?.open) return 'direct';
+  const ch = channels.get(c.id);
+  const st = relay && ch ? relay.streamState(ch.topic) : null;
+  const s = relay?.stats;
+  const failing = s && s.lastErrorAt > s.lastOkAt && Date.now() - s.lastErrorAt < 60_000;
+  if (navigator.onLine === false || failing) return 'none';
+  if (st === 'open') return 'relay';
+  return st === 'connecting' && Date.now() - (linkLostAt.get(c.id) ?? 0) < RELAY_GRACE_MS ? 'relay' : 'none';
+}
+
+const CONN_TEXT = { direct: 'direct', relay: 'via relay', none: 'no connection', idle: 'no contacts yet' };
+
+let lastConnKey = '';
+function renderConn() {
+  const cs = activeContacts();
+  const key = cs.map((c) => `${c.id}:${connOf(c)}`).join();
+  if (key !== lastConnKey) { // someone's connection changed: their line in People says so at once
+    if (lastConnKey) renderContacts();
+    lastConnKey = key;
+  }
+  const rank = { none: 0, relay: 1, direct: 2 };
+  const overall = cs.length ? cs.map(connOf).reduce((a, b) => (rank[b] < rank[a] ? b : a)) : 'idle';
+  const el = $('#status');
+  el.dataset.conn = overall;
+  el.setAttribute('aria-label', `Connection: ${CONN_TEXT[overall]}. ${$('#status-text').textContent}`);
+  el.title = `Connection: ${CONN_TEXT[overall]}`;
+}
+
+function connSummary() {
+  const cs = activeContacts();
+  if (!cs.length) return 'No contacts yet. Pair with someone under People.';
+  return cs.map((c) => `${label(c)}: ${CONN_TEXT[connOf(c)]}`).join(' · ');
 }
 
 // ---------- rendering ----------
@@ -910,7 +1012,7 @@ function renderMe() {
   const admins = activeContacts().filter((c) => c.adminOverMe).map(label);
   const notice = $('#admin-notice');
   notice.hidden = !admins.length;
-  if (admins.length) notice.textContent = `${admins.join(', ')} can see you even when sharing is off. This is set by them and cannot be changed here.`;
+  if (admins.length) notice.textContent = `${admins.join(', ')} can see you even when sharing is off. You approved this; only they can end it.`;
   $('#visible').disabled = false;
   const mt = traceOf('me');
   $('#trace-me').checked = mt.on;
@@ -919,8 +1021,9 @@ function renderMe() {
   $('#trace-me-colors').innerHTML = swatchesHtml('me', mt.color);
 }
 
+// Requests waiting for my answer: someone asking to become my admin.
 function renderRequests() {
-  const reqs = Object.values(state.contacts).filter((c) => c.status === 'request');
+  const reqs = Object.values(state.contacts).filter((c) => c.status === 'active' && c.adminAsk);
   const ul = $('#requests');
   ul.hidden = !reqs.length;
   const badge = $('#req-badge'); // so a request is noticed even while the map is showing
@@ -928,11 +1031,12 @@ function renderRequests() {
   badge.textContent = String(reqs.length);
   ul.innerHTML = reqs.map((c) => `
     <li class="contact request">
-      <div class="who"><div class="name">${esc(c.name)} wants to connect</div>
-      <div class="muted small">Check that this code matches theirs: <code class="fp" data-fp="${esc(c.id)}">${esc(c.id.match(/.{1,4}/g).join(' '))}</code></div></div>
+      <div class="who"><div class="name">${esc(label(c))} asks to be your admin</div>
+      <div class="muted small">If you approve, ${esc(label(c))} sees your position even when you turn sharing off,
+        and you can’t remove ${esc(label(c))} until they give it up. Only approve a parent or someone you fully trust.</div></div>
       <div class="contact-actions">
-        <button class="primary" data-act="accept" data-id="${esc(c.id)}">Accept</button>
-        <button class="ghost danger" data-act="decline" data-id="${esc(c.id)}">Decline</button>
+        <button class="primary" data-act="admin-yes" data-id="${esc(c.id)}">Approve</button>
+        <button class="ghost danger" data-act="admin-no" data-id="${esc(c.id)}">Decline</button>
       </div>
     </li>`).join('');
 }
@@ -945,7 +1049,7 @@ function renderContacts() {
     renderContactsRetry = setTimeout(renderContacts, 750);
     return;
   }
-  const all = Object.values(state.contacts).filter((c) => c.status !== 'request').sort((a, b) => label(a).localeCompare(label(b)));
+  const all = Object.values(state.contacts).filter((c) => c.status === 'active').sort((a, b) => label(a).localeCompare(label(b)));
   if (!all.length) {
     list.innerHTML = '<li class="muted empty">No contacts yet. Tap “Pair with a code” and tell them the code, or enter the code they give you.</li>';
     return;
@@ -965,10 +1069,14 @@ function renderContacts() {
     else if (visibleNow) status = 'Live';
     else if (!seeingThem(c)) status = 'Hidden by them';
     else status = c.pos ? 'Last position is old' : 'No position yet';
-    status += links.get(c.id)?.open ? ' · direct' : ' · via server';
+    status += ` · ${CONN_TEXT[connOf(c)]}`;
+    if (c.adminDeclined && !c.youAdminThem) status += ' · declined your admin request';
     const lock = c.adminOverMe ? '<span class="chip lock">Admin set · locked</span>' : '';
-    const adminBtn = c.adminOverMe ? '' :
-      `<button class="ghost" data-act="admin" data-id="${id}" data-on="${!c.youAdminThem}">${c.youAdminThem ? 'Remove my admin' : 'Make me admin'}</button>`;
+    const adminBtn = c.adminOverMe ? '' : c.youAdminThem
+      ? `<button class="ghost" data-act="admin" data-id="${id}" data-on="false">Remove my admin</button>`
+      : c.adminReq
+        ? `<button class="ghost" data-act="admin" data-id="${id}" data-on="false" title="Waiting for ${esc(label(c))} to approve">Admin asked · Cancel</button>`
+        : `<button class="ghost" data-act="admin" data-id="${id}" data-on="true">Ask to be admin</button>`;
     const removeBtn = canRemoveContact(c)
       ? `<button class="ghost danger" data-act="remove" data-id="${id}">Remove</button>`
       : '<button class="ghost" disabled title="Locked by an admin">Remove</button>';
@@ -1092,8 +1200,11 @@ async function onListClick(e) {
         wheelOpenFor = wheelOpenFor === c.id ? null : c.id;
         renderContacts();
         return;
-      case 'accept': await acceptRequest(c.id); break;
-      case 'decline': delete state.contacts[c.id]; break;
+      case 'admin-yes':
+        if (!confirm(`Let ${label(c)} see you even when sharing is off? You can’t undo this yourself.`)) return;
+        await answerAdmin(c, true);
+        break;
+      case 'admin-no': await answerAdmin(c, false); break;
       case 'focus':
         closePanel(); // show the map
         setFollow(followPerson(follow, c.id), { recentre: true }); // and follow this person
@@ -1106,10 +1217,8 @@ async function onListClick(e) {
       }
       case 'admin': {
         const on = btn.dataset.on === 'true';
-        if (on && !confirm(`Make yourself admin over ${c.name}? You will see their position even when they turn sharing off, and they cannot remove this.`)) return;
-        c.youAdminThem = on;
-        c.adminTouched = true;
-        await sendAdminState(c);
+        if (on && !confirm(`Ask ${c.name} to make you their admin? If they approve, you see their position even when they turn sharing off.`)) return;
+        await requestAdmin(c, on);
         break;
       }
       case 'remove':
@@ -1272,7 +1381,6 @@ function enableSheetDrag() {
 
 const togglePanel = (name) => (openTab === name ? closePanel() : openPanel(name));
 
-const inviteLink = () => `${location.origin}${location.pathname}#c=${encodeCard(cardOf(state.identity))}`;
 
 // ---------- debug overlay ----------
 
@@ -1280,7 +1388,7 @@ const inviteLink = () => `${location.origin}${location.pathname}#c=${encodeCard(
 function streamName(topic) {
   if (pairing?.topic === topic) return 'pairing code';
   for (const [id, ch] of channels) if (ch.topic === topic) return `→ ${label(state.contacts[id] ?? { name: '?' })}`;
-  return topic.startsWith('rope-inbox-') ? 'my inbox' : topic.startsWith('rope-pair-') ? 'pairing (join)' : topic.slice(0, 14);
+  return topic.startsWith('rope-pake-') ? 'pairing (joining)' : topic.slice(0, 14);
 }
 
 async function debugSnapshot() {
@@ -1320,7 +1428,14 @@ async function debugSnapshot() {
   }
   if (pairing) sections.push({ title: 'Pairing', rows: [['code', `${pairing.code}, ${Math.ceil((pairing.expires - now) / 1000)} s left`]] });
   for (const c of Object.values(state?.contacts ?? {})) {
-    const rows = [['status', c.status === 'active' ? (seeingThem(c) ? 'active, sharing with me' : 'active, hidden from me') : c.status]];
+    const conn = connOf(c);
+    const rows = [
+      ['status', c.status === 'active' ? (seeingThem(c) ? 'active, sharing with me' : 'active, hidden from me') : c.status],
+      ['connection', CONN_TEXT[conn], conn === 'none' ? 'error' : conn === 'relay' ? 'warn' : ''],
+    ];
+    if (c.adminAsk || c.adminReq || c.adminOverMe || c.youAdminThem) {
+      rows.push(['admin', c.adminOverMe ? 'they are my admin' : c.youAdminThem ? 'I am their admin' : c.adminAsk ? 'they ask, waiting for my answer' : 'I asked, waiting for theirs']);
+    }
     const link = links.get(c.id);
     if (link) {
       const ls = link.status();
@@ -1356,34 +1471,14 @@ async function startApp() {
   keys = await loadKeys(state.identity);
   relay = new Relay(state.relay || DEFAULT_RELAY, { log: logger('relay') });
   log.app('info', `started, build ${$('#build')?.textContent}, relay ${relay.base}`);
-  relay.subscribe(await inboxTopic(state.identity.ecdhPub), onInboxMessage, '12h');
   for (const c of activeContacts()) await openChannel(c);
-  for (const c of activeContacts()) if (c.adminTouched) sendAdminState(c);
-  // Re-send invites that haven't been answered yet (the rendezvous only keeps them for a while).
-  for (const c of Object.values(state.contacts)) {
-    if (c.status === 'pending') {
-      inboxTopic(c.e).then((t) => publish(t, { t: 'hello', card: encodeCard(cardOf(state.identity)) }));
-    }
-  }
+  for (const c of activeContacts()) resendAdmin(c);
   renderAll();
   setInterval(() => { renderContacts(); renderMarkers(); renderTraces(); }, 15_000);
+  setInterval(renderConn, 1_000);
+  renderConn();
   window.addEventListener('online', onNetworkBack);
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') onNetworkBack(); });
-  consumeInviteFromUrl();
-}
-
-function consumeInviteFromUrl() {
-  const m = /[#&]c=([A-Za-z0-9_-]+)/.exec(location.hash);
-  if (!m) return;
-  history.replaceState(null, '', location.pathname + location.search);
-  try {
-    const card = decodeCard(m[1]);
-    $('#add-code').value = m[1];
-    $('#add-error').hidden = false;
-    $('#add-error').classList.remove('error');
-    $('#add-error').textContent = `Invite from ${card.n}. Press Add to connect.`;
-    openPanel('people');
-  } catch { /* ignore a broken link */ }
 }
 
 function wire() {
@@ -1406,30 +1501,20 @@ function wire() {
     const out = $('#add-error');
     out.hidden = true; out.classList.add('error');
     try {
-      const raw = $('#add-code').value;
-      const pairCode = normalizePairCode(raw);
-      if (pairCode) {
-        $('#add-code').value = '';
-        await joinWithCode(pairCode);
-        return;
-      }
-      await addContactFromCode(raw);
+      const code = parseCode($('#add-code').value);
+      if (!code) throw new Error('A pairing code has 10 digits, like 37-4821-9305.');
       $('#add-code').value = '';
+      await joinWithCode(code);
     } catch (err) { showAddMessage(err.message, true); }
   });
 
   $('#pair-new').addEventListener('click', () => startPairing().catch((err) => { stopPairing(); showAddMessage(err.message, true); }));
   $('#pair-cancel').addEventListener('click', () => stopPairing());
-  $('#pair-copy').addEventListener('click', async () => {
-    if (!pairing) return;
-    try { await navigator.clipboard.writeText(pairing.code); setStatus('Code copied'); }
-    catch { prompt('Copy the code:', pairing.code); }
-  });
-
-  $('#copy-link').addEventListener('click', async () => {
-    try { await navigator.clipboard.writeText(inviteLink()); setStatus('Invite link copied'); }
-    catch { prompt('Copy your invite link:', inviteLink()); }
-  });
+  $('#pair-scan').addEventListener('click', () => startScan().catch((err) => {
+    stopScan();
+    showAddMessage(err.name === 'NotAllowedError' ? 'Camera access was refused. Type the number instead.' : err.message, true);
+  }));
+  $('#scan-cancel').addEventListener('click', stopScan);
 
   $('#gps-retry').addEventListener('click', () => { stopGps(); startGps(); });
 
@@ -1454,7 +1539,7 @@ function wire() {
   $('#close-panel').addEventListener('click', closePanel);
   enableSheetDrag();
   // Left arrow: follow me. Right arrow: follow the person chosen with Show. All: keep everyone in view.
-  $('#status').addEventListener('click', () => showToast($('#status-text').textContent));
+  $('#status').addEventListener('click', () => showToast(state ? `${connSummary()}${isPhone() ? ` — ${$('#status-text').textContent}` : ''}` : $('#status-text').textContent));
   $('#follow-me').addEventListener('click', () => {
     if (!myPos) { startGps(); setStatus('Waiting for your location…'); }
     setFollow(followMe(follow), { recentre: true });
@@ -1586,7 +1671,7 @@ function bootstrap() {
     return;
   }
   if (state) startApp().catch((err) => { setStatus(err.message); hideSplash(); });
-  else { $('#auth').hidden = false; setStatus('Create your identity'); consumeInviteFromUrl(); }
+  else { $('#auth').hidden = false; setStatus('Create your identity'); }
 }
 
 bootstrap();

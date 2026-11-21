@@ -82,18 +82,23 @@ export class Relay {
   /** onMessage(text, unixSeconds). Reconnects automatically; `since` replays recent messages. */
   subscribe(topic, onMessage, since = '5m') {
     if (this.subs.has(topic)) return;
-    const sub = { es: null, onMessage, since, lastId: null, opens: 0, errors: 0, lastMsgAt: 0 };
+    const sub = { es: null, onMessage, since, lastId: null, opens: 0, errors: 0, lastMsgAt: 0, paused: false, pausedAt: 0, isOpen: false };
     this.subs.set(topic, sub);
     this.#open(topic, sub);
   }
 
   #open(topic, sub) {
-    // After a drop, resume from the last message seen so nothing sent meanwhile is missed.
-    const since = sub.lastId ?? sub.since;
+    // After a drop or a pause, resume from the last message seen (or from shortly before the pause)
+    // so nothing sent meanwhile is missed.
+    const since = sub.lastId ?? (sub.pausedAt ? String(Math.floor(sub.pausedAt / 1000) - 5) : sub.since);
+    sub.isOpen = false;
     const es = new this.EventSource(`${this.base}/${topic}/sse?since=${encodeURIComponent(since)}`);
     sub.opens++;
     if (sub.opens > 1) this.log('info', `stream ${short(topic)} reopened (#${sub.opens})`);
-    es.onopen = () => this.log('info', `stream ${short(topic)} connected`);
+    es.onopen = () => {
+      sub.isOpen = true;
+      this.log('info', `stream ${short(topic)} connected`);
+    };
     es.onmessage = (e) => {
       sub.lastMsgAt = Date.now();
       try {
@@ -108,10 +113,12 @@ export class Relay {
     // The browser retries a dropped stream by itself, but gives up for good after an HTTP error
     // (a 429, or a captive page while the phone switches networks). Then we reopen it ourselves.
     es.onerror = () => {
+      if (sub.es !== es) return;
+      sub.isOpen = false;
       sub.errors++;
       this.log(es.readyState === CLOSED ? 'error' : 'warn',
         `stream ${short(topic)} ${es.readyState === CLOSED ? 'closed by the browser, reopening in 5 s' : 'dropped, browser retrying'}`);
-      if (es.readyState === CLOSED) setTimeout(() => { if (sub.es === es && this.subs.get(topic) === sub) this.#open(topic, sub); }, 5_000);
+      if (es.readyState === CLOSED) setTimeout(() => { if (sub.es === es && !sub.paused && this.subs.get(topic) === sub) this.#open(topic, sub); }, 5_000);
     };
     sub.es = es;
   }
@@ -119,6 +126,7 @@ export class Relay {
   /** Reopens streams that gave up (or all, with force). Call when the network returns or the page wakes. */
   reconnect({ force = false } = {}) {
     for (const [topic, sub] of this.subs) {
+      if (sub.paused) continue;
       if (force || sub.es.readyState === CLOSED) {
         sub.es.close();
         this.#open(topic, sub);
@@ -126,11 +134,40 @@ export class Relay {
     }
   }
 
+  /**
+   * Stop listening on a topic for now (a direct link carries the traffic), keeping its place.
+   * resume() picks up every message posted meanwhile, so a request to reconnect isn't lost.
+   */
+  pause(topic) {
+    const sub = this.subs.get(topic);
+    if (!sub || sub.paused) return;
+    sub.paused = true;
+    sub.pausedAt = Date.now();
+    sub.isOpen = false;
+    sub.es.close();
+    this.log('info', `stream ${short(topic)} paused (direct link)`);
+  }
+
+  resume(topic) {
+    const sub = this.subs.get(topic);
+    if (!sub || !sub.paused) return;
+    sub.paused = false;
+    this.#open(topic, sub);
+    sub.pausedAt = 0;
+  }
+
+  /** 'open' | 'connecting' | 'closed' | 'paused' | null (not subscribed). */
+  streamState(topic) {
+    const sub = this.subs.get(topic);
+    if (!sub) return null;
+    if (sub.paused) return 'paused';
+    return sub.isOpen && sub.es.readyState === 1 ? 'open' : sub.es.readyState === CLOSED ? 'closed' : 'connecting';
+  }
+
   /** For the debug overlay: one row per stream. */
   streams() {
-    const names = ['connecting', 'open', 'closed'];
     return [...this.subs].map(([topic, sub]) => ({
-      topic, state: names[sub.es?.readyState] ?? '?', opens: sub.opens, errors: sub.errors, lastMsgAt: sub.lastMsgAt,
+      topic, state: this.streamState(topic), opens: sub.opens, errors: sub.errors, lastMsgAt: sub.lastMsgAt,
     }));
   }
 

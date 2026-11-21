@@ -17,6 +17,7 @@
   --blue: #007aff;
   --red: #ff3b30;
   --green: #34c759;
+  --orange: #ff9500;
   --tint-bg: rgba(0, 122, 255, 0.12);
   --red-bg: rgba(255, 59, 48, 0.12);
   --material: rgba(255, 255, 255, 0.78);
@@ -43,6 +44,7 @@
     --blue: #0a84ff;
     --red: #ff453a;
     --green: #30d158;
+    --orange: #ff9f0a;
     --tint-bg: rgba(10, 132, 255, 0.22);
     --red-bg: rgba(255, 69, 58, 0.22);
     --material: rgba(28, 28, 30, 0.78);
@@ -65,6 +67,7 @@
   --blue: #0a84ff;
   --red: #ff453a;
   --green: #30d158;
+  --orange: #ff9f0a;
   --tint-bg: rgba(10, 132, 255, 0.22);
   --red-bg: rgba(255, 69, 58, 0.22);
   --material: rgba(28, 28, 30, 0.78);
@@ -139,9 +142,13 @@ code { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
 .brand:active { transform: scale(0.94); opacity: 1; }
 .status { color: var(--label); font-size: 13px; font-weight: 600; gap: 8px; max-width: 46vw; }
 .status-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.status-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--label-2); box-shadow: 0 0 0 1.5px var(--bar-halo); }
-.status[data-tone="ok"] .status-dot { background: var(--green); }
-.status[data-tone="warn"] .status-dot { background: var(--red); }
+.status-dot { width: 12px; height: 12px; border-radius: 50%; flex: none; background: var(--label-2); box-shadow: 0 0 0 2px var(--bar-halo); }
+/* The dot is the connection: green direct, orange via relay, red none, grey with no contacts yet. */
+.status[data-conn="direct"] .status-dot { background: var(--green); }
+.status[data-conn="relay"] .status-dot { background: var(--orange); }
+.status[data-conn="none"] .status-dot { background: var(--red); animation: conn-pulse 1.6s ease-in-out infinite; }
+@keyframes conn-pulse { 50% { opacity: 0.45; } }
+@media (prefers-reduced-motion: reduce) { .status[data-conn="none"] .status-dot { animation: none; } }
 
 /* Segmented control */
 .menu {
@@ -550,7 +557,6 @@ html[data-boot="reload"] .splash-reload { display: grid; }
   font: 600 2rem/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   letter-spacing: 0.08em; margin: 6px 0 10px; user-select: all; font-variant-numeric: tabular-nums;
 }
-#tab-people #copy-link { margin-top: 12px; }
 
 /* Debug overlay (four quick taps on "All"). Always dark, so it reads over any map. */
 #debug-overlay {
@@ -579,3 +585,17 @@ html[data-boot="reload"] .splash-reload { display: grid; }
 #debug-overlay .dbg-log li { overflow-wrap: anywhere; }
 #debug-overlay .dbg-log time { color: #7d8b95; }
 #debug-overlay .dbg-log b { color: #b7c6d0; font-weight: 600; }
+
+/* Pairing: the QR code stays black on white in dark mode too, so any camera reads it. */
+.pair-qr { width: min(240px, 70vw); margin: 4px auto 6px; background: #fff; border-radius: 10px; line-height: 0; }
+.pair-qr:empty { aspect-ratio: 1; }
+.pair-qr svg { width: 100%; height: auto; display: block; }
+#pair-scan { margin-bottom: 8px; }
+
+/* Camera scanner, full screen over everything. */
+.scan { position: fixed; inset: 0; z-index: 20; background: #000; color: #fff; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 24px 16px max(24px, env(safe-area-inset-bottom)); }
+.scan[hidden] { display: none; }
+.scan video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.scan-frame { position: relative; width: min(64vw, 300px); aspect-ratio: 1; border: 3px solid rgba(255, 255, 255, 0.9); border-radius: 18px; box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.45); }
+.scan p, .scan button { position: relative; }
+.scan p { margin: 0; text-align: center; font-weight: 600; text-shadow: 0 1px 4px #000; }

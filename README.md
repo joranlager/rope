@@ -16,59 +16,68 @@ Browsers only give GPS and WebCrypto on `https://` or `localhost`.
 
 ## How people find each other without a backend
 
-People can't connect directly without something to meet on. Rope uses a **rendezvous server**:
-a public [ntfy](https://ntfy.sh) publish/subscribe relay (default `https://ntfy.sh`). It is not
-ours and holds no accounts. It sees topic names and ciphertext only. You can point Rope at your
-own ntfy server under **Me → Rendezvous server**. Everyone in a circle must use the same one.
+People can't connect directly without something to meet on. Rope uses a **rendezvous server**
+(relay): a public [ntfy](https://ntfy.sh) publish/subscribe server (default `https://ntfy.sh`). It
+is not ours and holds no accounts. Rope uses it **only to pair, and to (re)connect when there is
+no direct link**. Everything it carries is either public values of the key exchange or ciphertext.
+You can point Rope at your own ntfy server under **Me → Rendezvous server**. Everyone in a circle
+must use the same one.
 
-1. **Identity.** On first run your browser creates two keys (ECDH for pairing, ECDSA for signing)
-   and stores them in `localStorage`. Nothing is uploaded.
-
-**Pairing with a code** (the simple way, after BeamBridge). One person taps **People → Pair with a
-code** and gets a code like `37-48219305`; the other types it into the same field where links are
-pasted and taps **Add**. Both are contacts straight away: knowing the code is the consent, so there
-is no accept step. The code works **once**, for **10 minutes**.
-
-- The code is the only secret. Both phones turn it into the same rendezvous topic and AES-GCM key
-  with a deliberately slow derivation (PBKDF2-SHA-256, 600 000 rounds, then HKDF), and swap their
-  contact cards (name and public keys) sealed with that key. Then pairing continues as in step 4.
-- The person who enters the code sends a random nonce and only accepts the answer that quotes it,
-  so an old answer for a spent code is never taken for a new one.
-- Security, compared with BeamBridge: BeamBridge runs a PAKE (SPAKE2) over magic-wormhole, so a
-  wrong guess burns the code and nobody can test codes offline. Browsers have no PAKE built in, so
-  Rope relies on the code being unguessable for its 10 minutes: 10 digits (10^10 codes) times
-  600 000 rounds each is far more than anyone can try in that time, the rendezvous server only sees
-  a topic derived from the code, and once pairing is over nothing secret remains (the cards hold
-  public keys only). Give the code only to the person you mean, over a channel you trust.
-
-**Pairing with an invite link** (still there, under the code):
-2. **Invite.** *Copy my invite link* gives a reusable link (`…#c=<card>`). The card holds your name
-   and public keys. The part after `#` is never sent to a web server.
-3. **Request.** The person who opens the link sends a request to your inbox topic on the
-   rendezvous server. You see it with a security code and accept or decline.
-4. **Per-contact secret.** On accept, both sides derive the same secret from their keys (ECDH).
-   It gives each contact its own AES-GCM key and its own unguessable topic.
-5. **Sharing.** Positions are encrypted and published to that contact's topic every 10 s.
-   The rendezvous server only relays ciphertext.
-6. **Direct link (peer to peer).** Each pair also tries to open a direct WebRTC data channel, after
-   OneChat's serverless connect. The offer and answer are packed into compact codes (ICE ufrag and
-   password, DTLS fingerprint, UDP candidates) and sent over the encrypted pair topic; the other side
-   rebuilds the SDP from a template. A public STUN server (Google, Cloudflare) tells each phone its
-   public address, and the peer's public candidates are re-added every few seconds so both NATs keep
-   their hole open until the checks meet. The side with the lower id always offers, so the two never
-   offer at once. Because the fingerprint arrives sealed with the contact's key, only that contact can
+1. **Identity.** On first run your browser creates two keys (ECDH for the per-contact secret, ECDSA
+   for signing admin requests and answers) and stores them in `localStorage`. Nothing is uploaded.
+2. **Pairing with a number.** One person taps **People → Show a pairing code**. It shows a number
+   like `37-4821-9305` and the same number as a QR code. The other person taps **Scan their code**
+   and points the camera at the screen, or types the number, for example while they talk on the
+   phone. The code works **once**, for **10 minutes**. Knowing it is the consent: both are contacts
+   straight away.
+   - The number is protected by a **PAKE** (password-authenticated key exchange), as in BeamBridge.
+     Rope uses CPace on ristretto255 (`public/pake.js`, with the audited `@noble/curves`).
+     The first 2 digits pick a meeting topic, and the other 8 are the password. Both phones turn the
+     password into a secret point, exchange one random multiple of it each, and get the same key only
+     if they used the same number. Each side then proves it holds the key (HMAC), and the contact
+     cards (name and public keys) are exchanged encrypted with it.
+   - The relay sees only those random points, proofs and ciphertext. Neither the relay nor anyone
+     listening can learn the number or test guesses offline. Every guess needs a live exchange with
+     the person showing the code, and the code is spent after **3 tries** or the first success.
+     A wrong number is reported in a few seconds.
+3. **Per-contact secret.** From the two identities, both phones derive the same secret (ECDH). It
+   gives each contact an AES-GCM key and an unguessable topic of its own.
+4. **Direct link (peer to peer).** The phones then open a direct WebRTC data channel, after
+   OneChat's serverless connect. The offer and answer are packed into compact codes (ICE user and
+   password, DTLS fingerprint, UDP candidates), sealed with the contact's key and sent over their
+   topic. The other side rebuilds the SDP from a template. A public STUN server (Google, Cloudflare)
+   tells each phone its public address, and the peer's public candidates are re-added every few
+   seconds so both NATs keep their hole open until the checks meet. The side with the lower id
+   always offers. The fingerprint arrives sealed with the contact's key, so only that contact can
    complete the handshake.
-   While the direct link is open, positions go straight between the phones every 3 s and the
-   rendezvous server is not used for them (visibility and admin messages still go through it too,
-   so a phone that is offline gets them later). If the link can't open (some mobile networks block
-   direct connections and there is no TURN relay) or drops, positions fall back to the rendezvous
-   server, and the link is retried with back-off (20 s doubling to 5 min), and at once when the
-   network comes back or the app is reopened. Each contact shows **direct** or **via server**.
-7. **Rate limits.** ntfy.sh limits requests per IP address, and mobile carriers often put many
-   phones behind one address. A failed send is retried twice; a *429 Too Many Requests* is not
-   retried, and position updates over the server pause for as long as it asks (`Retry-After`).
-   Every pair message carries the sender's id, because the server echoes your own messages back
-   on the shared topic.
+5. **While the direct link is open, the relay is not used at all.** Everything goes over the data
+   channel: positions every 3 s, sharing on or off, and admin requests and answers. The contact's
+   relay stream is paused, so the relay doesn't even see that you are online.
+6. **When the direct link fails** (no signal, a new network, the app in the background, or a carrier
+   that blocks direct connections), Rope falls back to the relay at once:
+   - it reopens the contact's stream from where it was paused, so nothing is lost;
+   - it sends your state through the relay (sealed);
+   - it sends positions every 10 s;
+   - it re-establishes the direct link through the relay with back-off (20 s doubling to 5 min, and
+     at once when the network comes back or the app is reopened).
+
+   When the link is back, the relay is paused again.
+7. **Status symbol.** The dot at the top right shows the connection:
+   - **green**: direct to everyone;
+   - **orange**: at least one contact only via the relay;
+   - **red**: no connection to at least one contact (offline, relay unreachable and no direct link);
+   - **grey**: no contacts yet.
+
+   Tap it for each contact's state. Each contact's line in People says *direct*, *via relay* or
+   *no connection*.
+8. **Rate limits.** ntfy.sh limits requests per IP address, and mobile carriers often put many
+   phones behind one address. With direct links this matters little. Over the relay, a failed send
+   is retried twice. A *429 Too Many Requests* is not retried, and position updates through the
+   relay pause for as long as it asks (`Retry-After`).
+9. **All messages between contacts** are sealed with AES-GCM and carry the sender's id (the relay
+   echoes your own messages back to you) and a timestamp. A message older than 10 minutes, or not
+   newer than the last one of its kind (remembered across reloads), is rejected, so the relay
+   can't replay old messages.
 
 ## Following, trails and reload
 
@@ -122,10 +131,18 @@ is no accept step. The code works **once**, for **10 minutes**.
 
 - **Share my position** off: your client stops sending to everyone except your admins, and tells
   contacts you're hidden.
-- **Admin:** *Make me admin* on a contact sends them a grant signed with your signing key.
-  Their client then keeps sending to you even when they hide, and shows the grant as locked.
-- The subject can't forge a revocation: grants are verified against the admin's public signing key,
-  and stale or replayed grants are ignored. They can't remove the contact in the UI while it's in force.
+- **Admin needs the other person's approval.** *Ask to be admin* sends a request signed with your
+  signing key. The other person sees it under People, with what it means: you will see them even
+  when they turn sharing off, and they can't remove you until you give it up. Only if they tap
+  **Approve** (an answer signed with *their* key, over your request) does it count. **Decline** tells
+  you so. Until then your button reads *Admin asked · Cancel*, and nothing changes for them.
+- Requests, answers and releases are stored and sent again until they arrive, so it works if the
+  other phone is offline for a while. Each is verified against the sender's public signing key, and
+  replayed or old ones are ignored.
+- The admin can give it up at any time (*Remove my admin*). The subject sees who their admins are
+  under Me.
+- Grants made by earlier versions without approval are not trusted: on update, the subject is asked
+  to approve them, and the admin's request is sent again.
 
 ### What this does and doesn't guarantee
 
@@ -138,11 +155,10 @@ guarantee needs software the subject can't control, such as a managed device.
 ## Network flows
 
 Who talks to whom. **A** and **B** are two phones running Rope; **ntfy** is the rendezvous server
-(`https://ntfy.sh` by default); **STUN** is a public STUN server (Google, Cloudflare). Everything
-sent through ntfy is AES-GCM ciphertext except the invite-link handshake (public cards). GitHub
-renders these diagrams; elsewhere, paste them into [mermaid.live](https://mermaid.live).
+(relay, `https://ntfy.sh` by default); **STUN** is a public STUN server (Google, Cloudflare).
+GitHub renders these diagrams; elsewhere, paste them into [mermaid.live](https://mermaid.live).
 
-### 1. Pairing with a code
+### 1. Pairing with a number (QR code or read aloud), protected by a PAKE
 
 ```mermaid
 sequenceDiagram
@@ -152,77 +168,33 @@ sequenceDiagram
     participant N as ntfy
     participant B as Phone B
     actor UB as Person B
-    UA->>A: People, Pair with a code
-    A->>A: code = 10 random digits, e.g. 37-48219305
-    A->>A: PBKDF2 600k rounds then HKDF gives pair topic and AES key
-    A->>N: subscribe rope-pair-T (SSE)
-    A-->>UA: shows the code, valid once for 10 min
-    UA-->>UB: tells the code (in person, phone, chat)
-    UB->>B: enters the code, Add
-    B->>B: same derivation gives the same topic and key
-    B->>N: subscribe rope-pair-T
-    B->>N: POST sealed pair-hello with card B and nonce n
-    N-->>A: pair-hello
-    A->>A: open with code key, stop listening (code spent)
-    A->>A: add B, ECDH secret, per-contact AES key and topic
-    A->>N: POST sealed pair-ack with card A and nonce n
-    N-->>B: pair-ack
-    B->>B: nonce matches, add A, same ECDH secret
-    Note over A,B: Both are contacts now. Continue with 3 and 4.
+    UA->>A: People, Show a pairing code
+    A->>A: code 37-4821-9305 (nameplate 37, password 48219305)
+    A->>N: subscribe rope-pake-v1-37
+    A-->>UA: shows the digits and a QR code, valid once for 10 min
+    UA-->>UB: QR code scanned with the camera, or the number read aloud on the phone
+    UB->>B: scans or types the code
+    B->>B: g = hash_to_ristretto255(password, nameplate, session id)
+    B->>N: subscribe rope-pake-v1-37
+    B->>N: p1 session id, Yb = yb times g
+    N-->>A: p1
+    A->>A: Ya = ya times g, K = ya times Yb, key from K and the transcript
+    A->>N: p2 Ya and a MAC proving A knows the password
+    N-->>B: p2
+    B->>B: K = yb times Ya, check the MAC (a wrong number fails here)
+    B->>N: p3 MAC from B and the card of B, encrypted
+    N-->>A: p3
+    A->>A: check the MAC, code spent, add B
+    A->>N: p4 the card of A, encrypted
+    N-->>B: p4
+    B->>B: add A
+    Note over A,B: Each guess costs a live exchange, the code dies after 3 tries. Continue with 2.
 ```
 
-### 2. Pairing with an invite link
+### 2. Direct link: established through the relay, then the relay is left alone
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant A as Phone A
-    participant N as ntfy
-    participant B as Phone B
-    Note over A: invite link = rope URL with card A after the hash (name, public keys)
-    A-->>B: link shared out of band (not via ntfy)
-    A->>N: subscribe inbox topic of A (since 12h)
-    B->>N: subscribe inbox topic of B
-    B->>N: POST hello with card B to inbox of A (plaintext JSON)
-    N-->>A: hello
-    A->>A: request shown with security code of B
-    A->>A: person accepts, ECDH secret, per-contact AES key and topic
-    A->>N: POST ack with card A to inbox of B (plaintext JSON)
-    N-->>B: ack
-    B->>B: ECDH secret, same key and topic
-```
-
-### 3. Sharing positions through the rendezvous server
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant A as Phone A
-    participant N as ntfy
-    participant B as Phone B
-    A->>N: subscribe pair topic P (SSE, since 5m, later since last id)
-    B->>N: subscribe pair topic P
-    A->>N: POST sealed vis (sharing on or off) with sender id
-    N-->>B: vis
-    N-->>A: vis echoed back to its sender
-    A->>A: sender id is mine, dropped
-    loop every 10 s per contact while no direct link
-        A->>N: POST sealed pos (lat, lon, accuracy, time)
-        N-->>B: pos
-        B->>B: decrypt, check time and order, move the marker
-    end
-    opt admin grant
-        A->>N: POST sealed admin on, signed with ECDSA key of A
-        N-->>B: admin
-        B->>B: verify signature, B keeps sending to A even when hidden
-    end
-```
-
-### 4. Direct peer-to-peer link (WebRTC)
-
-The phone with the lower id makes offers; the other only asks. Offer and answer are compact
-codes (ICE user and password, DTLS fingerprint, UDP candidates), sealed and sent over the pair
-topic, and the SDP is rebuilt from a template on the other side.
+The phone with the lower id makes offers; the other only asks. Offer and answer are compact codes
+(ICE user and password, DTLS fingerprint, UDP candidates), sealed with the contact's key.
 
 ```mermaid
 sequenceDiagram
@@ -231,17 +203,17 @@ sequenceDiagram
     participant S as STUN
     participant N as ntfy
     participant B as Phone B (answerer)
-    B->>N: sealed rtc req (I want a link)
+    A->>N: subscribe pair topic P (stream open while there is no direct link)
+    B->>N: subscribe pair topic P
+    B->>N: sealed rtc req
     N-->>A: req
     A->>S: binding request
     S-->>A: your public address
-    A->>A: create offer, wait for candidates (max 4 s)
     A->>N: sealed rtc offer (compact code, session id)
     N-->>B: offer, ignored if older than 60 s
     B->>S: binding request
     S-->>B: your public address
-    B->>B: rebuild SDP, create answer
-    B->>N: sealed rtc answer (compact code, same session id)
+    B->>N: sealed rtc answer
     N-->>A: answer
     par hole punching
         A->>B: ICE checks, public candidates of B re-added every 4 s
@@ -249,15 +221,16 @@ sequenceDiagram
         B->>A: ICE checks, public candidates of A re-added every 4 s
     end
     A->>B: DTLS handshake, fingerprint checked against the sealed code
-    Note over A,B: Data channel open. Both show direct.
-    loop every 3 s
-        A->>B: sealed pos over the data channel
-        B->>A: sealed pos over the data channel
+    Note over A,B: Data channel open. Status green.
+    A--)N: pause stream P
+    B--)N: pause stream P
+    loop every 3 s, nothing through ntfy
+        A->>B: sealed pos, vis, admin over the data channel
+        B->>A: sealed pos, vis, admin over the data channel
     end
-    Note over A,N: ntfy now carries no positions, only vis and admin (also sent directly)
 ```
 
-### 5. Failure, fallback and recovery
+### 3. Fallback through the relay, and back to direct
 
 ```mermaid
 sequenceDiagram
@@ -265,75 +238,100 @@ sequenceDiagram
     participant A as Phone A
     participant N as ntfy
     participant B as Phone B
-    alt carrier blocks direct connections
-        A--xB: ICE checks never succeed
-        A->>A: attempt fails after 45 s, retry in 20 s, 40 s, up to 5 min
-        A->>N: positions keep going via ntfy every 10 s (via server)
-    else link drops (new cell, tunnel, background)
-        A--xB: ICE disconnected for 8 s or channel closed
-        A->>N: positions fall back to ntfy at once
-        Note over A: the browser fires online or the page becomes visible
-        A->>N: reopen closed streams from the last message id
-        A->>N: new offer (or B sends req), back to flow 4
+    A--xB: link lost (ICE disconnected 8 s, or the channel closed)
+    Note over A: status orange
+    A->>N: resume stream P from just before the pause (nothing missed)
+    A->>N: sealed vis and admin state, then sealed pos every 10 s
+    N-->>B: (when B listens) the same
+    alt B comes back (new network, app reopened)
+        B->>N: sealed rtc req
+        N-->>A: req
+        A->>N: new offer, then as in 2
+        Note over A,B: direct again, status green, streams paused
+    else carrier blocks direct connections
+        A->>A: attempts fail after 45 s, retry in 20 s, 40 s, up to 5 min
+        Note over A,B: positions keep going through ntfy, status orange
     else ntfy rate limit
-        A->>N: POST pos
         N-->>A: 429 Too Many Requests, Retry-After
-        A->>A: no retry, pause positions via ntfy for Retry-After or 30 s
-        A->>B: a direct link, if open, carries on
-    else network error or 5xx
-        A->>N: POST
-        N--xA: failure
-        A->>N: retry after 1 s, then 4 s, then warn once a minute
+        A->>A: no retry, positions through ntfy paused for Retry-After or 30 s
+    else ntfy unreachable too
+        Note over A: status red, streams retried, link retried when the network returns
+    end
+```
+
+### 4. Admin rights with consent
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor UA as Person A
+    participant A as Phone A
+    participant B as Phone B
+    actor UB as Person B
+    UA->>A: Ask to be admin
+    A->>B: admin on, time t, signed by A (direct, or sealed via the relay)
+    B->>B: verify the signature of A, show the request (nothing changes yet)
+    B-->>UB: A asks to be your admin, and what it means
+    alt UB approves
+        UB->>B: Approve
+        B->>A: adminok yes for request t, signed by B
+        A->>A: verify the signature of B, A is now admin
+        Note over B: B keeps sending to A even with sharing off, and can't remove A
+    else UB declines
+        UB->>B: Decline
+        B->>A: adminok no for request t, signed by B
+        A-->>UA: declined
+    end
+    opt later
+        UA->>A: Remove my admin
+        A->>B: admin off, time t2 greater than t, signed by A
     end
 ```
 
 ## Security assessment
 
-An assessment of the current code (build after the debug overlay), as a reviewer would
-write it. Severity reflects impact on the people using Rope. "Fixed" means fixed in this code.
+An assessment of the current code, as a reviewer would write it. Severity reflects impact on the
+people using Rope. The **Status** column says what this version did about each finding.
 
 ### What is protected, and how
 
 | Asset | Protection |
 |---|---|
-| Positions, visibility, admin grants between two contacts | AES-256-GCM, key from static ECDH P-256 plus HKDF. The relay sees only ciphertext. |
-| Contact authenticity | ECDH: only the holder of the private key can derive the pair key. Invite requests show a 16-character security code (96 bits of the key hash) to compare. Code pairing: knowing the code is the authentication. |
-| Admin grants | ECDSA P-256 signature by the admin, checked against their key; replays and old grants are rejected by timestamp. |
-| Direct link | DTLS fingerprint and ICE credentials travel sealed with the pair key, so a man in the middle can't complete the handshake. Data-channel messages are also sealed with the pair key. |
-| Pairing code | 10 digits (10^10), PBKDF2-SHA-256 600 000 rounds, one use, 10 minutes. Nonce binds the answer to the request. |
-| Page | Content-Security-Policy, all user-supplied text escaped before it reaches HTML. |
+| First contact (pairing) | A 10-digit one-time code, exchanged by QR code (screen to camera) or read aloud, protected by a PAKE (CPace on ristretto255, `@noble/curves`). There are no offline guesses; each online guess needs the other phone, and the code dies after 3 tries, the first success or 10 minutes. Explicit key confirmation (HMAC) both ways. Cards are encrypted with the PAKE key. |
+| Positions, visibility, admin messages | AES-256-GCM with a per-contact key (static ECDH P-256 plus HKDF), on the direct link and on the relay. Sender id and timestamp; replays and old messages are rejected, also after a reload. |
+| Direct link | WebRTC DTLS (ephemeral keys); the DTLS fingerprint and ICE credentials are exchanged sealed with the per-contact key, so nobody in the middle can complete the handshake. |
+| Use of the relay | Only for pairing and while there is no direct link. With a direct link, the contact's relay stream is closed. |
+| Admin rights | Request signed by the would-be admin; rights only after the subject's signed approval of that very request. |
+| Page | Content-Security-Policy; all user-supplied text escaped; no third-party code for pairing or crypto (vendored, pinned, built from npm by `npm run vendor`). |
 
 ### Findings
 
-| # | Severity | Finding | Recommendation |
+| # | Severity | Finding | Status / recommendation |
 |---|---|---|---|
-| 1 | **High** | **Admin rights are taken, not given.** Any contact can tap *Make me admin*. The subject's app obeys a validly signed grant without asking, keeps sending its position even with sharing off, and blocks removing that contact. The only way out is deleting the identity. This is meant for parents, but it lets any contact (an ex-partner, for example) track someone who no longer consents. | Make the subject consent once (a request they accept, showing who and what), and show a persistent notice. Allow revoking consent except where a separate, deliberate parental mode was chosen on the child's device. |
-| 2 | **High** | **Private keys share an origin with other sites.** GitHub Pages serves every project of the account as `joranlager.github.io/<repo>/`, one origin. `localStorage` (and the CSP's `'self'`) is per origin, so any page on that origin, such as another project, a test branch deploy or a compromised dependency there, can read Rope's private keys and contacts. | Serve Rope from its own origin (a custom domain or a dedicated account). Store keys as non-extractable `CryptoKey`s in IndexedDB instead of JWK in `localStorage`. |
-| 3 | Medium | **Third-party scripts without integrity checks.** MapLibre comes from unpkg with no SRI hash, and the CSP allows all of `https://unpkg.com`. A compromised CDN or package could run code with full access to keys and position. | Add `integrity` hashes, or vendor MapLibre into `public/`. Narrow the CSP to that exact file. |
-| 4 | Medium | **No forward secrecy.** Each pair uses one static key derived from long-term keys. ntfy keeps ciphertext for hours. Anyone who later gets either private key (backup, stolen device, finding 2) can decrypt recorded traffic and all future traffic. | Add an ephemeral key exchange per session (for example a ratchet over the pair topic) and key rotation. Re-pairing creates new keys. |
-| 5 | Medium | **Location sent to third parties in the clear.** Hoydedata (Kartverket) gets your exact coordinates whenever you move 50 m or after 60 s. OSRM gets route start and end. The OpenStreetMap tile server sees the area you view. All see your IP. | Make terrain height optional (off by default) or coarse, and say so in the UI. Consider a proxy you control, or a self-hosted router and tiles. |
-| 6 | Medium | **Metadata visible to the relay.** ntfy sees IPs, timing and stable per-pair topic names, so it can link who talks to whom. Invite-link hello and ack messages are **plaintext** cards (names and public keys) on an inbox topic that anyone holding your card can compute and watch. | Seal the inbox handshake (for example to the recipient's ECDH key), self-host ntfy, and pad or batch messages if metadata matters. |
-| 7 | Low-Medium | **A direct link reveals your public IP to the contact,** and STUN servers (Google, Cloudflare) see it. The link is set up even when you have sharing off, so a contact you hide from still learns your IP, a rough location. | Don't open direct links to contacts you hide from (unless they are your admin), and add a setting for "server only". |
-| 8 | Low | **Replay of old messages by the relay.** The relay can resend ciphertext it has stored. Positions are protected (time window of 10 min plus ordering), but only within a session: after a reload, a replay up to 10 min old can show a stale position. `vis` has no timestamp, so an old one can be replayed to flip "hidden" or "visible" in the display (positions are still decided by the sender). | Add timestamps and a per-contact high-water mark to every message type, persisted across reloads. |
-| 9 | Low | **Reusable invite link.** Anyone who gets the link can send requests indefinitely (they still need an accept), and can flood the request list. Pair codes don't have this problem. | Prefer codes. Rate-limit or collapse repeated requests, and allow resetting the invite (new inbox key). |
-| 10 | Low | **Pairing code guessing.** No PAKE, unlike BeamBridge. Brute force means 10^10 codes times 600 000 PBKDF2 rounds within 10 minutes, which is out of reach. Whoever enters a code first wins it, so an overheard code means a wrong pairing; the result is shown on both sides. | Show the security code after pairing too, and for higher assurance use a PAKE (SPAKE2 or CPace) through a vetted library. |
-| 11 | Low | **The debug log can contain IP addresses** (the route of a direct link) and contact names. *Copy* puts them on the clipboard. | Mask addresses unless asked, and say so next to *Copy*. |
-| 12 | Info | **Visibility is enforced by the sender's own app** (see [What this does and doesn't guarantee](#what-this-does-and-doesnt-guarantee)). A modified client can stop sending, or keep sending to someone it was told to hide from. | By design; document it, as now. |
-| 13 | Info | **Backup contains private keys in plain text.** *Copy backup* puts them on the clipboard, where other apps may read them. | Encrypt the backup with a passphrase. |
+| 1 | High | **Admin rights could be taken without consent.** | **Fixed.** Admin needs the subject's signed approval. Old unapproved grants must be approved again. |
+| 2 | **High** | **Private keys share an origin with other sites.** GitHub Pages serves every project of the account as `joranlager.github.io/<repo>/`, one origin. `localStorage` (and the CSP's `'self'`) is per origin, so any page on that origin can read Rope's private keys and contacts. | **Open.** Serve Rope from its own origin (a custom domain or a dedicated account). Store keys as non-extractable `CryptoKey`s in IndexedDB. |
+| 3 | Medium | **Third-party map script without integrity check.** MapLibre comes from unpkg with no SRI hash, and the CSP allows all of `https://unpkg.com`. | **Open.** Vendor MapLibre like the other libraries, and drop unpkg from the CSP. (The pairing and QR libraries are already vendored.) |
+| 4 | Medium | **No forward secrecy on relay messages.** The per-contact key is static. Anyone who later gets a private key can decrypt relay traffic recorded earlier (ntfy keeps it for hours). | **Reduced.** With a direct link nothing goes through the relay, and DTLS on the link has forward secrecy. Open for relay fallback: add an ephemeral key exchange per session. |
+| 5 | Medium | **Location sent to third parties.** Hoydedata (Kartverket) gets your coordinates for terrain height; OSRM gets route ends; the OpenStreetMap tile server sees the area you view. | **Open.** Make terrain height optional or coarse; consider a proxy or self-hosting. |
+| 6 | Medium | **Relay metadata.** | **Reduced.** The plaintext invite handshake and inbox are gone (pairing goes through the PAKE). With a direct link, the relay doesn't see you at all. Remaining: during pairing and fallback the relay sees IPs, timing and the per-pair topic. Self-host ntfy if this matters. |
+| 7 | Low-Medium | **A direct link reveals your public IP to the contact** (and to the STUN servers), even when you hide from them. | **Open.** Option: no direct link to contacts you hide from, or a "relay only" setting. |
+| 8 | Low | **Replay of old messages by the relay.** | **Fixed.** All messages carry a timestamp; older than 10 min, or not newer than the last of their kind (kept across reloads), is rejected. |
+| 9 | Low | **Reusable invite link** anyone could use to send requests. | **Fixed.** The invite link is removed; the only way to pair is a one-time code. |
+| 10 | Low | **Pairing code without PAKE** (offline brute force against the derived topic). | **Fixed.** Replaced by CPace. Note: with a 2-digit nameplate, two people pairing at the same moment can meet on the same topic. The PAKE keeps them apart (wrong proofs are ignored), but a stranger's join attempt counts against your 3 tries. |
+| 11 | Low | **The debug log can contain IP addresses** (the route of a direct link) and names; *Copy* puts them on the clipboard. | **Open.** Mask addresses unless asked. |
+| 12 | Low | **A spoken or shown code can be overheard or seen.** Whoever enters it first, within 10 minutes, is paired. | **By design**, as in BeamBridge. Read the code only to the person you mean and check that both phones say *Paired with* the right name. |
+| 13 | Info | **Visibility is enforced by the sender's own app** (see [What this does and doesn't guarantee](#what-this-does-and-doesnt-guarantee)). | By design. |
+| 14 | Info | **Backup contains private keys in plain text.** | **Open.** Encrypt the backup with a passphrase. |
 
-**Fixed during this work:**
-- The relay echoes every message back to its sender, so your own position and visibility were taken as the contact's. Messages now carry a sender id, and your own are dropped.
-- An old answer to a spent pairing code was accepted by a later joiner. A per-request nonce now prevents it.
-- Rate-limit storms are no longer made worse by retries.
+**Fixed in earlier work:**
+- The relay echoed your own messages back, and they were taken as the contact's. A sender id now prevents it.
+- Rate-limit storms were made worse by retries. A 429 is no longer retried.
 
-**Good practice already in place:** no backend of its own and no accounts. Encryption and
-signatures use WebCrypto only, with no home-grown primitives. User-supplied text is escaped
-before it reaches HTML. There is a strict CSP for scripts. Received data is validated
-(coordinates, timestamps, signatures, compact codes). Private keys never leave the device
-except through an explicit backup.
-
-**Not covered:** no penetration test, dependency audit or review of MapLibre itself, and no
-testing on real devices or networks.
+**Not covered:** no penetration test, no audit of the bundled libraries (they are widely used and,
+for `@noble/curves`, independently audited), and no testing on real devices or carrier networks.
+The CPace construction follows the CFRG draft in structure (generator from the password and
+session id, ephemeral shares, transcript-bound key, explicit confirmation) but is not a byte-exact
+implementation of it.
 
 ## Limits and things to verify
 
@@ -347,16 +345,18 @@ testing on real devices or networks.
   for regular use.
 - Routing uses the OSRM demo server (car only). Walk and bike need a different routing service.
 - Your private keys live only in this browser. Use **Me → Copy backup** and keep it secret.
-- No SRI hashes on the MapLibre CDN tags yet.
+- No SRI hashes on the MapLibre CDN tags yet (see finding 3).
 
 ## Layout
 
 ```
 public/index.html  the single page (with a Content-Security-Policy meta tag)
 public/app.js      UI, GPS, contacts, handshake, messaging, routing
-public/crypto.js   keys, cards, ECDH/HKDF, AES-GCM, signatures
+public/crypto.js   identity keys, cards, ECDH/HKDF, AES-GCM, signatures
 public/net.js      ntfy publish/subscribe
 public/p2p.js      direct WebRTC link per contact: compact offer/answer codes, hole punching
+public/pake.js     pairing with a number: CPace PAKE over the relay
+public/vendor/     bundled libraries (@noble/curves, jsQR, qrcode-generator), built by npm run vendor
 public/debug.js    debug overlay and its event log (four taps on All)
 public/social.js   pure visibility and admin rules (unit tested)
 public/geo.js      haversine, elevation helpers
