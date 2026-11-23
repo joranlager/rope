@@ -603,3 +603,9 @@ html[data-boot="reload"] .splash-reload { display: grid; }
 /* Height map button: above the measure tape */
 .fab-height { bottom: calc(52px + 2 * (44px + 14px) + env(safe-area-inset-bottom)); }
 .fab-height[aria-pressed="true"] { background: var(--blue); color: #fff; border-color: transparent; }
+
+/* Offline map button: above the 3D button */
+.fab-offline { bottom: calc(52px + 3 * (44px + 14px) + env(safe-area-inset-bottom)); }
+.fab-offline[aria-pressed="true"] { background: var(--blue); color: #fff; border-color: transparent; }
+.pad-row { padding: 8px 16px; }
+.pad-note { padding: 0 16px 12px; margin: 0; }

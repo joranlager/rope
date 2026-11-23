@@ -15,6 +15,7 @@ import { personHex, contrastText } from './colors.js';
 import { buildDistanceItems, visibleMidpoint, symmetricBounds } from './distance.js';
 import { mountWheelPicker, wheelIsBusy, resetWheelActivity } from './wheel.js';
 import { registerDemProtocol } from './demprotocol.js';
+import * as offline from './offline.js';
 import { PROTOCOL as DEM_PROTOCOL, DEM_MIN_ZOOM, DEM_MAX_ZOOM, EXAGGERATION, TILT } from './terrain.js';
 import {
   TRACE_COLORS, traceSettings, addPoint, trimToDistance, toFeature, labelForLength, metersOfLength,
@@ -137,6 +138,10 @@ function initMap() {
     if (e.sourceId === 'terrain-dem') { // a terrain tile that could not be made: the ground is flat there for now
       if (++terrainErrors === 1) setStatus('Some terrain data could not be loaded');
       return; // not the red "map problem" banner, which is for the base map
+    }
+    if (offlineOn() && e.sourceId === 'osm') { // a tile that is not saved: the map stays empty there, not an error
+      if (++offlineErrors === 1) setStatus('Offline: this part of the map is not saved on this device');
+      return;
     }
     if (mapErrorShown) return;
     mapErrorShown = true;
@@ -373,6 +378,67 @@ function setTerrain3D(on) {
     showToast(map.getZoom() < DEM_MIN_ZOOM ? 'Zoom in to see the terrain in 3D' : '3D terrain: tilt with two fingers, or right-drag');
     demNoted = map.getZoom() < DEM_MIN_ZOOM;
   }
+}
+
+// ---------- offline map ----------
+// The service worker (sw.js) keeps the map tiles, terrain tiles and heights that are looked at. "Go
+// offline" tells it to use only those and make no map requests, so the map works without a network.
+
+const offlineOn = () => state?.offlineMap === true;
+let offlineErrors = 0;
+
+function syncOfflineUi() {
+  const on = offlineOn();
+  const btn = $('#offline');
+  btn.setAttribute('aria-pressed', String(on));
+  btn.title = on ? 'Go back online with the map' : 'Go offline with the map';
+  btn.setAttribute('aria-label', btn.title);
+  $('#offline-switch').checked = on;
+}
+
+async function refreshOfflineStats() {
+  if (!offline.supported()) {
+    $('#offline-count').textContent = 'Not supported here';
+    $('#offline-bytes').textContent = '—';
+    $('#offline-switch').disabled = true;
+    $('#offline-clear').disabled = true;
+    return;
+  }
+  const st = await offline.stats();
+  $('#offline-count').textContent = st.parts.map((p) => `${p.count.toLocaleString()} ${p.label.toLowerCase()}`).join(' · ');
+  $('#offline-bytes').textContent = st.bytes == null ? '—' : offline.formatBytes(st.bytes);
+}
+
+async function setOfflineMap(on, { quiet = false } = {}) {
+  try {
+    await offline.setOfflineMode(on);
+  } catch (err) {
+    setStatus(`Offline map: ${err.message}. Reload and try again.`);
+    syncOfflineUi();
+    return;
+  }
+  state.offlineMap = on; // off by default
+  saveState();
+  syncOfflineUi();
+  offlineErrors = 0;
+  if (!quiet) showToast(on ? 'Offline map: using only what is saved on this device' : 'Back online');
+  if (on) offline.keepStorage();
+  if (mapReady) { // draw again with the new mode: saved tiles appear, missing ones stop being retried
+    for (const id of ['osm', 'terrain-dem']) map.getSource(id)?.reload?.();
+  }
+  refreshOfflineStats();
+}
+
+async function startOffline() {
+  const reg = await offline.register();
+  if (!reg) {
+    if (offlineOn()) { state.offlineMap = false; saveState(); }
+    syncOfflineUi();
+    return;
+  }
+  // The worker remembers the mode too, but the page's own setting wins, so both always agree.
+  try { if (offlineOn() !== (await offline.getOfflineMode())) await offline.setOfflineMode(offlineOn()); } catch { /* the worker starts on the next load */ }
+  syncOfflineUi();
 }
 
 // ---------- distances ----------// ---------- distances ----------
@@ -1101,6 +1167,7 @@ function renderMe() {
   $('#me-name').textContent = state.identity.name;
   $('#visible').checked = state.visible;
   $('#relay').value = state.relay;
+  refreshOfflineStats();
   $('#fingerprint').textContent = state.identity.id.match(/.{1,4}/g).join(' ');
   const admins = activeContacts().filter((c) => c.adminOverMe).map(label);
   const notice = $('#admin-notice');
@@ -1559,6 +1626,9 @@ async function startApp() {
   $('#follow-me').hidden = false;
   $('#measure').hidden = false;
   $('#heightmap').hidden = false;
+  $('#offline').hidden = false;
+  syncOfflineUi();
+  startOffline();
   syncTerrainButton();
   if (terrainOn()) setAttribution(true);
   renderDistances();
@@ -1642,6 +1712,13 @@ function wire() {
   });
   $('#follow-person').addEventListener('click', () => setFollow(pressPersonArrow(follow), { recentre: true }));
   $('#heightmap').addEventListener('click', () => setTerrain3D(!terrainOn()));
+  $('#offline').addEventListener('click', () => setOfflineMap(!offlineOn()));
+  $('#offline-switch').addEventListener('change', (e) => setOfflineMap(e.target.checked));
+  $('#offline-clear').addEventListener('click', async () => {
+    const n = await offline.clearSaved();
+    showToast(n ? `Forgot ${n.toLocaleString()} saved map parts` : 'Nothing was saved');
+    refreshOfflineStats();
+  });
   $('#measure').addEventListener('click', () => {
     state.showDistances = state.showDistances !== true; // off by default
     saveState();

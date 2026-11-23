@@ -121,6 +121,20 @@ must use the same one.
   - *Limits:* zoom 8 to 13 (below that, and where the service has no data, the ground is flat). A failed
     tile is retried once and asked for again later; a short outage does not flatten the ground for good.
     **All** shows everyone from above, so it lifts the tilt while the terrain stays on.
+- **Offline map:** everything the map uses is saved on the device **as you use it**, by a service worker
+  (`sw.js`): the app's own files, the MapLibre library, OpenStreetMap tiles, the 3D terrain tiles and the
+  point heights. Nothing is downloaded ahead of time, so look at the area you will need while you have a
+  network. Map tiles are refreshed in the background after 7 days, terrain after 90 days; each store is
+  capped (about 5 000 map tiles, 1 200 terrain tiles) and drops its oldest entries.
+  - **Go offline:** the cloud button above the 3D button (or the switch under **Me → Offline map**) makes the
+    map use *only* saved parts and send no map requests. Unsaved places stay empty, with a short note
+    instead of an error. The setting is remembered. With no network at all the app still starts from the
+    saved copy, even without switching this on.
+  - **Me → Offline map** shows how much is saved and has **Forget saved map**. Routing, point heights not yet
+    seen, and the people relay still need a network. People's positions will not update while offline.
+  - The app's files are fetched fresh when there is a network, so an update arrives at the next visit.
+    Add it to the home screen for a full-screen app (a manifest and icon are included). iOS may clear
+    saved data for sites not used for a while, so open the map again before a trip.
 - **Scale:** a small scale line at the bottom left adapts as you zoom in and out.
 - **Colour:** each person, you included, has one colour, used for their map marker, avatar, arrow and trail.
   Pick it from the palette (or leave it on Auto) in their card, or under Me for yourself. It is set
@@ -380,6 +394,9 @@ public/geo.js      haversine, elevation helpers
 public/distance.js distance labels and where to place them on screen (pure, tested)
 public/terrain.js  3D terrain: tiles, GeoTIFF decoding, resampling, Terrarium encoding (pure, tested)
 public/demprotocol.js  makes the terrain tiles on demand for the map library
+public/sw.js       service worker: saves the app and the map parts as they are used (unit tested)
+public/offline.js  page side of offline maps: register, offline mode, what is saved
+public/manifest.webmanifest  + icons/  makes the app installable
 public/follow.js   what the map is following: me, a person, or all (pure, tested)
 public/colors.js   one colour per person and a visible glyph colour (pure, tested)
 public/trace.js    trails: trimming, jitter, colours, the wheel model (pure, tested)
