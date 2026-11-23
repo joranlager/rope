@@ -599,3 +599,7 @@ html[data-boot="reload"] .splash-reload { display: grid; }
 .scan-frame { position: relative; width: min(64vw, 300px); aspect-ratio: 1; border: 3px solid rgba(255, 255, 255, 0.9); border-radius: 18px; box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.45); }
 .scan p, .scan button { position: relative; }
 .scan p { margin: 0; text-align: center; font-weight: 600; text-shadow: 0 1px 4px #000; }
+
+/* Height map button: above the measure tape */
+.fab-height { bottom: calc(52px + 2 * (44px + 14px) + env(safe-area-inset-bottom)); }
+.fab-height[aria-pressed="true"] { background: var(--blue); color: #fff; border-color: transparent; }

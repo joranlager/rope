@@ -15,6 +15,10 @@ import { personHex, contrastText } from './colors.js';
 import { buildDistanceItems, visibleMidpoint, symmetricBounds } from './distance.js';
 import { mountWheelPicker, wheelIsBusy, resetWheelActivity } from './wheel.js';
 import {
+  MIN_ZOOM as HM_MIN_ZOOM, MARGIN as HM_MARGIN, OPACITY as HM_OPACITY, MIN_GAP_MS as HM_MIN_GAP_MS,
+  withMargin, requestSize, getMapUrl, corners as imageCorners, intersectsCoverage, needsReload as heightNeedsReload,
+} from './heightmap.js';
+import {
   TRACE_COLORS, traceSettings, addPoint, trimToDistance, toFeature, labelForLength, metersOfLength,
   colorHex, hexToRgba,
 } from './trace.js';
@@ -120,8 +124,9 @@ function initMap() {
       layers: [{ id: 'osm', type: 'raster', source: 'osm' }],
     },
     center: [10.75, 59.91], zoom: 11,
-    attributionControl: { compact: true },
+    attributionControl: false, // added below, so the height map's credit can be added and removed
   });
+  setAttribution(false);
   map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-left');
   // A small scale line that adapts as you zoom in and out.
   map.addControl(new maplibregl.ScaleControl({ maxWidth: 110, unit: 'metric' }), 'bottom-left');
@@ -154,6 +159,7 @@ function initMap() {
     }, 'route-line');
     renderTraces();
     renderDistances();
+    if (heightmapOn()) refreshHeightmap({ force: true });
   });
   map.on('click', (e) => {
     if (routeMode) setDestination({ lat: e.lngLat.lat, lon: e.lngLat.lng });
@@ -161,7 +167,7 @@ function initMap() {
 
   // Dragging the map by hand stops following. The map's own animated moves don't fire dragstart.
   map.on('dragstart', () => setFollow(dragged(follow)));
-  map.on('moveend', () => { programmaticMove = false; });
+  map.on('moveend', () => { programmaticMove = false; if (heightmapOn()) scheduleHeightmap(); });
   map.on('move', placeDistanceLabels);
   // Resizing the window (or turning the phone) keeps following whatever is being followed.
   map.on('resize', () => { if (follow.target !== null) moveToFollowed({ force: true }); });
@@ -281,6 +287,141 @@ function setTrace(id, patch) {
   }
   saveState();
   renderAll();
+}
+
+// ---------- height map ----------
+// The height map button overlays Kartverket's coloured terrain heights (hoydedata.no). Off by
+// default; the choice is remembered. One image covers the visible map area (plus a margin), because
+// the service fits its colours to each request and tiles would not match along their edges. A new
+// image is requested only when the screen leaves the loaded one or the zoom changes a good way.
+// Details and the service checks are in heightmap.js.
+
+const HM = { loaded: null, token: 0, abort: null, timer: null, lastAt: 0, urls: [], noted: '' };
+let attributionControl = null;
+
+const heightmapOn = () => state?.showHeightmap === true;
+
+/** The map's credits: OpenStreetMap always, and Kartverket while the height map is shown. */
+function setAttribution(heightOn) {
+  if (attributionControl) map.removeControl(attributionControl);
+  attributionControl = new maplibregl.AttributionControl({
+    compact: true,
+    customAttribution: heightOn ? 'Height map © <a href="https://www.kartverket.no/" target="_blank" rel="noopener">Kartverket</a> (hoydedata.no)' : undefined,
+  });
+  map.addControl(attributionControl, 'bottom-right');
+}
+
+const viewBounds = () => { const b = map.getBounds(); return { west: b.getWest(), south: b.getSouth(), east: b.getEast(), north: b.getNorth() }; };
+
+/** Takes the overlay off the map and cancels anything in flight. */
+function removeHeightmap() {
+  HM.abort?.abort();
+  HM.abort = null;
+  HM.token++; // anything still arriving is out of date
+  clearTimeout(HM.timer);
+  HM.timer = null;
+  HM.loaded = null;
+  if (map?.getLayer('heightmap')) map.removeLayer('heightmap');
+  if (map?.getSource('heightmap')) map.removeSource('heightmap');
+  for (const u of HM.urls) URL.revokeObjectURL(u);
+  HM.urls = [];
+}
+
+// Asked for when the map stops moving. At most one request waits at a time, so a walk that keeps
+// the map moving still refreshes the overlay now and then.
+function scheduleHeightmap(delay = 800) {
+  if (HM.timer) return;
+  HM.timer = setTimeout(() => { HM.timer = null; refreshHeightmap(); }, delay);
+}
+
+/** Say once why nothing is shown, instead of leaving a silent blank. */
+function noteHeightmap(reason, text) {
+  if (HM.noted === reason) return;
+  HM.noted = reason;
+  showToast(text);
+}
+
+async function refreshHeightmap({ force = false } = {}) {
+  if (!heightmapOn() || !map || !mapReady) return;
+  const view = viewBounds();
+  const zoom = map.getZoom();
+  if (zoom < HM_MIN_ZOOM) { removeHeightmapImage(); return noteHeightmap('zoom', 'Zoom in to see the height map'); }
+  if (!intersectsCoverage(view)) { removeHeightmapImage(); return noteHeightmap('area', 'The height map covers Norway and its surroundings'); }
+  HM.noted = '';
+  if (!force && !heightNeedsReload(HM.loaded, view, zoom)) return;
+  const wait = HM_MIN_GAP_MS - (Date.now() - HM.lastAt);
+  if (!force && wait > 0) { scheduleHeightmap(wait + 50); return; } // not more often than the service should be asked
+
+  const bounds = withMargin(view, HM_MARGIN);
+  const canvas = map.getCanvas();
+  const url = getMapUrl(bounds, requestSize(canvas.clientWidth, canvas.clientHeight, HM_MARGIN));
+  HM.abort?.abort();
+  const ctrl = new AbortController();
+  HM.abort = ctrl;
+  const token = ++HM.token;
+  HM.lastAt = Date.now();
+
+  let blob;
+  try {
+    const res = await fetch(url, { signal: ctrl.signal });
+    // The service answers an unsupported request with JSON and a 200, so check what came back is a picture.
+    if (!res.ok || !(res.headers.get('content-type') || '').startsWith('image/')) throw new Error(`the service answered ${res.status}`);
+    blob = await res.blob();
+  } catch (err) {
+    if (err.name === 'AbortError' || token !== HM.token) return; // replaced by a newer request, or switched off
+    log.app('warn', `height map: ${err.message}`);
+    setStatus('Height map unavailable');
+    return;
+  }
+  if (token !== HM.token || !heightmapOn()) return;
+
+  const objectUrl = URL.createObjectURL(blob);
+  HM.urls.push(objectUrl);
+  const coordinates = imageCorners(bounds);
+  if (map.getSource('heightmap')) {
+    map.getSource('heightmap').updateImage({ url: objectUrl, coordinates });
+  } else {
+    map.addSource('heightmap', { type: 'image', url: objectUrl, coordinates });
+    // Just above the base map, under the trails, lines and route.
+    const above = map.getStyle().layers.find((l) => l.id !== 'osm')?.id;
+    map.addLayer({
+      id: 'heightmap', type: 'raster', source: 'heightmap',
+      paint: { 'raster-opacity': HM_OPACITY, 'raster-fade-duration': 0 },
+    }, above);
+  }
+  HM.loaded = { bounds, zoom };
+  while (HM.urls.length > 2) URL.revokeObjectURL(HM.urls.shift()); // the older pictures are no longer needed
+}
+
+/** Takes the picture away but keeps the switch on (zoomed out too far, or looking elsewhere). */
+function removeHeightmapImage() {
+  HM.abort?.abort();
+  HM.token++;
+  HM.loaded = null;
+  if (map.getLayer('heightmap')) map.removeLayer('heightmap');
+  if (map.getSource('heightmap')) map.removeSource('heightmap');
+}
+
+function syncHeightmapButton() {
+  const on = heightmapOn();
+  const btn = $('#heightmap');
+  btn.setAttribute('aria-pressed', String(on));
+  btn.title = on ? 'Hide the height map' : 'Show the height map';
+  btn.setAttribute('aria-label', btn.title);
+}
+
+function setHeightmap(on) {
+  state.showHeightmap = on; // off by default
+  saveState();
+  syncHeightmapButton();
+  setAttribution(on);
+  HM.noted = '';
+  if (on) {
+    showToast('Height map: colours are fitted to what is on screen');
+    refreshHeightmap({ force: true });
+  } else {
+    removeHeightmap();
+  }
 }
 
 // ---------- distances ----------
@@ -1465,6 +1606,9 @@ async function startApp() {
   $('#menu').hidden = false; // the map stays in view; panels open from the top menu
   $('#follow-me').hidden = false;
   $('#measure').hidden = false;
+  $('#heightmap').hidden = false;
+  syncHeightmapButton();
+  if (heightmapOn()) { setAttribution(true); if (mapReady) refreshHeightmap({ force: true }); }
   renderDistances();
   renderFollowUi();
   startGps(); // first, so a failure further down can't leave location unasked
@@ -1545,6 +1689,7 @@ function wire() {
     setFollow(followMe(follow), { recentre: true });
   });
   $('#follow-person').addEventListener('click', () => setFollow(pressPersonArrow(follow), { recentre: true }));
+  $('#heightmap').addEventListener('click', () => setHeightmap(!heightmapOn()));
   $('#measure').addEventListener('click', () => {
     state.showDistances = state.showDistances !== true; // off by default
     saveState();

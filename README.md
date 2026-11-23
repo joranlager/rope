@@ -104,6 +104,20 @@ must use the same one.
   retry and the last error) and messages sent/received directly and via the server; and a log of
   recent events, warnings (yellow) and errors (red). **Copy** puts all of it on the clipboard, to
   paste into a bug report.
+- **Height map:** the mountain button (bottom right, above the measure tape) overlays Kartverket's coloured
+  terrain heights from [hoydedata.no](https://hoydedata.no) on the map. It is **off by default** and the choice
+  is remembered. It uses the WMS `https://wms.geonorge.no/skwms1/wms.hoyde-dtm`, layer
+  `DTM:dynamisk_farget_hoyde` (checked against the service's own capabilities document). Heights are drawn
+  60% see-through so roads and names still show, and Kartverket is credited on the map while it is on.
+  - *Why one image and not tiles:* "dynamic" means the service fits its colours to each request. Requested
+    as tiles, neighbours differed by about 12 colour levels along their shared edge, so the app asks for
+    **one image covering the visible area plus a margin**. The colours therefore scale to what is on
+    screen (the toast says so), as they do on hoydedata.no.
+  - *Data use:* an image is about 0.3 MB (up to 0.5 MB). A new one is requested only when the screen leaves
+    the loaded image or the zoom changes by about three quarters of a level, and never more often than
+    every 1.5 s. Nothing is requested while it is off.
+  - *Limits:* it covers Norway and its surroundings; elsewhere the image is transparent, and the app does not
+    ask at all when the screen is outside the covered area, or zoomed out past zoom 5.
 - **Scale:** a small scale line at the bottom left adapts as you zoom in and out.
 - **Colour:** each person, you included, has one colour, used for their map marker, avatar, arrow and trail.
   Pick it from the palette (or leave it on Auto) in their card, or under Me for yourself. It is set
@@ -361,6 +375,7 @@ public/debug.js    debug overlay and its event log (four taps on All)
 public/social.js   pure visibility and admin rules (unit tested)
 public/geo.js      haversine, elevation helpers
 public/distance.js distance labels and where to place them on screen (pure, tested)
+public/heightmap.js the height map: service, request, margins, when to ask again (pure, tested)
 public/follow.js   what the map is following: me, a person, or all (pure, tested)
 public/colors.js   one colour per person and a visible glyph colour (pure, tested)
 public/trace.js    trails: trimming, jitter, colours, the wheel model (pure, tested)
