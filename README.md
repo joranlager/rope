@@ -140,6 +140,11 @@ must use the same one.
   nearest named road within 25 m (a road's number, such as E6, is used when it has no name). If there is no
   road that close, the fix is rough (worse than 60 m), there is no network or Offline map is on, nothing is
   shown. It asks at most every 6 s and only after moving 25 m, and never shows the previous person's road.
+  - **Ask about a road:** press the **?** button (top of the button stack on the right), then tap a spot on
+    the map. If a road is there, its name shows in the same pill and a see-through card lists what
+    OpenStreetMap knows (type, number, speed limit, lanes, surface, one-way, bridge, tunnel, lights, mapped
+    length) while the road is drawn on the map. If not, you are told "No road here". The tap reaches about
+    16 px around your finger, at least 25 m. Press **?** again to leave; the road you are on returns.
 - **Scale:** a small scale line at the bottom left adapts as you zoom in and out.
 - **Colour:** each person, you included, has one colour, used for their map marker, avatar, arrow and trail.
   Pick it from the palette (or leave it on Auto) in their card, or under Me for yourself. It is set

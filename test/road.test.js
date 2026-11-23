@@ -53,3 +53,39 @@ test('when to ask again', () => {
   assert.equal(shouldLookup(null, 0, p(60, 'me', 200), haversineM), false, 'rough fix');
   assert.equal(shouldLookup(null, 0, null, haversineM), false);
 });
+
+import { describeRoad, tapRadiusM } from '../public/road.js';
+
+test('a tapped road is described: title, facts and its shape', () => {
+  const json = { elements: [way('Storgata', north(4), { maxspeed: '50', lanes: '2', surface: 'asphalt', oneway: 'yes', lit: 'yes', ref: 'Fv12' })] };
+  const r = describeRoad(json, 60, 10.001);
+  assert.equal(r.title, 'Storgata');
+  const rows = Object.fromEntries(r.rows);
+  assert.equal(rows.Type, 'Residential street');
+  assert.equal(rows['Speed limit'], '50 km/h');
+  assert.equal(rows.Surface, 'Asphalt');
+  assert.equal(rows.Direction, 'One-way');
+  assert.equal(rows['Road number'], 'Fv12');
+  assert.match(rows['Mapped length'], /^\d+ m$/);
+  assert.deepEqual(r.line[0], [10, north(4)]);
+});
+
+test('an unnamed road is still described, and nothing is returned far from any road', () => {
+  const r = describeRoad({ elements: [way(null, north(3), { highway: 'track' })] }, 60, 10.001);
+  assert.equal(r.title, 'Unnamed track');
+  assert.equal(r.name, null);
+  assert.equal(describeRoad({ elements: [way('X', north(80))] }, 60, 10.001), null);
+  assert.equal(describeRoad(null, 60, 10.001), null);
+});
+
+test('a named street beats an unnamed path that is only slightly nearer', () => {
+  const json = { elements: [way('Main St', north(6)), way(null, north(4), { highway: 'footway' })] };
+  assert.equal(describeRoad(json, 60, 10.001).title, 'Main St');
+  const far = { elements: [way('Main St', north(20)), way(null, north(3), { highway: 'footway' })] };
+  assert.equal(describeRoad(far, 60, 10.001).title, 'Unnamed footway');
+});
+
+test('a tap spans more ground when zoomed out', () => {
+  assert.equal(tapRadiusM(18, 60), 25);
+  assert.ok(tapRadiusM(12, 60) > 100);
+});

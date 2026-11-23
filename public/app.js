@@ -16,7 +16,7 @@ import { buildDistanceItems, visibleMidpoint, symmetricBounds } from './distance
 import { mountWheelPicker, wheelIsBusy, resetWheelActivity } from './wheel.js';
 import { registerDemProtocol } from './demprotocol.js';
 import * as offline from './offline.js';
-import { roadQuery, parseRoad, shouldLookup } from './road.js';
+import { roadQuery, parseRoad, shouldLookup, describeRoad, tapRadiusM } from './road.js';
 import { PROTOCOL as DEM_PROTOCOL, DEM_MIN_ZOOM, DEM_MAX_ZOOM, EXAGGERATION, TILT } from './terrain.js';
 import {
   TRACE_COLORS, traceSettings, addPoint, trimToDistance, toFeature, labelForLength, metersOfLength,
@@ -167,12 +167,18 @@ function initMap() {
       layout: { 'line-cap': 'round' },
       paint: { 'line-color': ['get', 'color'], 'line-width': 2, 'line-opacity': 0.85, 'line-dasharray': [2, 2] },
     }, 'route-line');
+    map.addSource('inspect-road', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    map.addLayer({ id: 'inspect-line', type: 'line', source: 'inspect-road', filter: ['==', '$type', 'LineString'],
+      paint: { 'line-color': '#2563eb', 'line-width': 9, 'line-opacity': 0.4 }, layout: { 'line-cap': 'round', 'line-join': 'round' } });
+    map.addLayer({ id: 'inspect-point', type: 'circle', source: 'inspect-road', filter: ['==', '$type', 'Point'],
+      paint: { 'circle-radius': 6, 'circle-color': '#fff', 'circle-stroke-color': '#2563eb', 'circle-stroke-width': 3 } });
     renderTraces();
     renderDistances();
     applyTerrain(); // the 3D terrain, if it was left switched on
     if (terrainOn()) map.jumpTo({ pitch: TILT });
   });
   map.on('click', (e) => {
+    if (inspectOn) return inspectAt(e.lngLat.lat, e.lngLat.lng);
     if (routeMode) setDestination({ lat: e.lngLat.lat, lon: e.lngLat.lng });
   });
 
@@ -467,6 +473,7 @@ function roadSubject() {
 }
 
 async function updateRoad() {
+  if (inspectOn) return; // a tapped road is on show
   const who = roadSubject();
   if (!who || offlineOn() || navigator.onLine === false) return hideRoad();
   if (roadShownFor !== null && roadShownFor !== who.id) hideRoad(); // never show the previous person's road
@@ -485,6 +492,77 @@ async function updateRoad() {
   } finally {
     roadBusy = false;
   }
+}
+
+// ---------- road info: the ? button ----------
+// Tap ?, then a spot on the map. If a road is there its name shows in the pill under the menu bar, with
+// a see-through card of facts and the road drawn on the map. Tap ? again to leave and go back to the
+// road I am on.
+
+let inspectOn = false;
+let inspectSeq = 0;
+
+function clearInspect() {
+  $('#road-info').hidden = true;
+  map?.getSource('inspect-road')?.setData({ type: 'FeatureCollection', features: [] });
+}
+
+function setInspect(on) {
+  inspectOn = on;
+  inspectSeq++;
+  document.body.classList.toggle('inspecting', on);
+  $('#inspect').setAttribute('aria-pressed', String(on));
+  clearInspect();
+  hideRoad();
+  if (on) showToast('Tap a spot on the map to see the road');
+  else { roadLast = null; updateRoad(); }
+}
+
+async function inspectAt(lat, lon) {
+  if (offlineOn() || navigator.onLine === false) { showToast('Road information needs a network'); return; }
+  const mine = ++inspectSeq;
+  const radius = tapRadiusM(map.getZoom(), lat);
+  clearInspect();
+  map.getSource('inspect-road')?.setData({ type: 'Feature', geometry: { type: 'Point', coordinates: [lon, lat] }, properties: {} });
+  $('#road').textContent = 'Looking…';
+  $('#road').hidden = false;
+  let result;
+  try {
+    const res = await fetch(roadQuery(lat, lon, Math.round(radius)), { signal: AbortSignal.timeout(10000) });
+    if (!res.ok) throw new Error(`the road service answered ${res.status}`);
+    result = describeRoad(await res.json(), lat, lon, radius);
+  } catch (err) {
+    if (mine !== inspectSeq) return;
+    hideRoad();
+    showToast('Could not get road information. Try again.');
+    log.app('warn', `road info: ${err.message}`);
+    return;
+  }
+  if (mine !== inspectSeq) return; // another tap, or the tool was switched off, meanwhile
+  if (!result) {
+    hideRoad();
+    showToast('No road here');
+    return;
+  }
+  $('#road').textContent = result.title;
+  const card = $('#road-info');
+  card.replaceChildren();
+  const h = document.createElement('h4');
+  h.textContent = result.title;
+  card.append(h);
+  for (const [k, v] of result.rows) {
+    const row = document.createElement('div');
+    row.className = 'ri-row';
+    const a = document.createElement('span'); a.textContent = k;
+    const b = document.createElement('b'); b.textContent = v;
+    row.append(a, b);
+    card.append(row);
+  }
+  card.hidden = false;
+  map.getSource('inspect-road')?.setData({ type: 'FeatureCollection', features: [
+    { type: 'Feature', geometry: { type: 'LineString', coordinates: result.line }, properties: {} },
+    { type: 'Feature', geometry: { type: 'Point', coordinates: [lon, lat] }, properties: {} },
+  ] });
 }
 
 // ---------- distances ----------// ---------- distances ----------
@@ -1675,6 +1753,7 @@ async function startApp() {
   $('#measure').hidden = false;
   $('#heightmap').hidden = false;
   $('#offline').hidden = false;
+  $('#inspect').hidden = false;
   setInterval(updateRoad, 4000); // also asks when a position stays put but the wait since the last question is over
   syncOfflineUi();
   startOffline();
@@ -1761,6 +1840,7 @@ function wire() {
   });
   $('#follow-person').addEventListener('click', () => setFollow(pressPersonArrow(follow), { recentre: true }));
   $('#heightmap').addEventListener('click', () => setTerrain3D(!terrainOn()));
+  $('#inspect').addEventListener('click', () => setInspect(!inspectOn));
   $('#offline').addEventListener('click', () => setOfflineMap(!offlineOn()));
   $('#offline-switch').addEventListener('change', (e) => setOfflineMap(e.target.checked));
   $('#offline-clear').addEventListener('click', async () => {

@@ -619,3 +619,20 @@ html[data-boot="reload"] .splash-reload { display: grid; }
   -webkit-backdrop-filter: saturate(180%) blur(28px); backdrop-filter: saturate(180%) blur(28px);
 }
 .road[hidden] { display: none; }
+
+/* Road info: the ? button above the offline button, and the see-through card for a tapped road */
+.fab-inspect { bottom: calc(52px + 4 * (44px + 14px) + env(safe-area-inset-bottom)); }
+.fab-inspect[aria-pressed="true"] { background: var(--blue); color: #fff; border-color: transparent; }
+body.inspecting #map canvas { cursor: crosshair; }
+.road-info {
+  position: fixed; z-index: 5; left: 50%; top: calc(max(10px, env(safe-area-inset-top)) + 84px); transform: translateX(-50%);
+  width: min(300px, calc(100vw - 32px)); padding: 10px 14px; border-radius: 16px; pointer-events: none;
+  background: color-mix(in srgb, var(--material) 38%, transparent); border: 0.5px solid var(--material-edge);
+  -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+  color: var(--label); text-shadow: 0 0 8px var(--bar-halo), 0 0 2px var(--bar-halo); font-size: 14px;
+}
+.road-info[hidden] { display: none; }
+.road-info h4 { margin: 0 0 6px; font-size: 15px; }
+.road-info .ri-row { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
+.road-info .ri-row span:first-child { color: var(--label-2); }
+.road-info .ri-row b { font-weight: 650; text-align: right; }
