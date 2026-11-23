@@ -139,7 +139,7 @@ must use the same one.
   (the bottom-right arrow or Show). It comes from OpenStreetMap's road data via the Overpass API: the
   nearest named road within 25 m (a road's number, such as E6, is used when it has no name). If there is no
   road that close, the fix is rough (worse than 60 m), there is no network or Offline map is on, nothing is
-  shown. It asks at most every 6 s and only after moving 25 m, and never shows the previous person's road.
+  shown. Good answers are saved on the device (any of the three servers' answers serve all, positions are rounded to about 11 m so nearby questions share one entry, refreshed after 30 days), so a place already looked up works offline and costs no request. It asks at most every 6 s and only after moving 25 m, and never shows the previous person's road.
   - **Ask about a road:** press the **?** button (top of the button stack on the right), then tap a spot on
     the map. If a road is there, its name shows in the same pill and a see-through card lists what
     OpenStreetMap knows (type, number, speed limit, lanes, surface, one-way, bridge, tunnel, lights, mapped

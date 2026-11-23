@@ -7,6 +7,7 @@
  *   osm    OpenStreetMap map tiles      saved as they are looked at; refreshed in the background after 7 days
  *   dem    Kartverket height tiles      saved as used (the 3D terrain); refreshed after 90 days
  *   elev   Kartverket height at a point saved as used
+ *   road   road data from Overpass     saved as used (any of its servers answers the same question); refreshed after 30 days
  * Nothing is downloaded ahead of time: only what has been looked at is kept, which is also what
  * OpenStreetMap's tile policy asks of apps. The routing service and the people relay are never
  * touched here; they need the network.
@@ -36,16 +37,18 @@ const CACHES = {
   osm: 'rope-osm-v1',
   dem: 'rope-dem-v1',
   elev: 'rope-elev-v1',
+  road: 'rope-road-v1',
   meta: 'rope-meta-v1',
 };
 const DAY = 24 * 60 * 60 * 1000;
-const TTL = { osm: 7 * DAY, dem: 90 * DAY, elev: 365 * DAY, lib: Infinity };
+const TTL = { osm: 7 * DAY, dem: 90 * DAY, elev: 365 * DAY, road: 30 * DAY, lib: Infinity };
 // Roughly: 5 000 map tiles of ~20 KB, 1 200 height tiles of ~66 KB, many tiny heights.
-const LIMITS = { osm: 5000, dem: 1200, elev: 4000 };
+const LIMITS = { osm: 5000, dem: 1200, elev: 4000, road: 3000 };
 const CONFIG = { shellTimeoutMs: 4000, trimEvery: 40 };
 const STAMP = 'x-rope-cached-at';
 const META_KEY = 'https://rope.invalid/offline-mode'; // a made-up address, used only as a key
 
+const OVERPASS_HOSTS = ['overpass-api.de', 'overpass.private.coffee', 'overpass.kumi.systems'];
 const now = () => Date.now();
 const cacheName = (kind) => CACHES[kind];
 const indexUrl = () => new URL('./', self.registration.scope).href;
@@ -58,6 +61,7 @@ function kindOf(url, origin) {
   if (u.hostname === 'tile.openstreetmap.org') return 'osm';
   if (u.hostname === 'wcs.geonorge.no' && u.pathname.startsWith('/skwms1/wcs.hoyde-dtm')) return 'dem';
   if (u.hostname === 'ws.geonorge.no' && u.pathname.startsWith('/hoydedata/')) return 'elev';
+  if (OVERPASS_HOSTS.includes(u.hostname) && u.pathname === '/api/interpreter') return 'road';
   if (u.hostname === 'unpkg.com' && u.pathname.startsWith('/maplibre-gl@')) return 'lib';
   return null;
 }
@@ -92,9 +96,22 @@ async function stamped(res) {
   return new Response(await res.arrayBuffer(), { status: res.status, statusText: res.statusText, headers });
 }
 
+/** What a saved answer is filed under. The road servers hold the same data, so they share one entry. */
+function keyFor(kind, request) {
+  if (kind !== 'road') return request;
+  return `https://rope.invalid/road${new URL(request.url).search}`;
+}
+
+/** An overloaded Overpass server answers 200 with a "remark" instead of data: never keep that. */
+async function sound(kind, res) {
+  if (kind !== 'road') return true;
+  try { const j = await res.clone().json(); return Array.isArray(j.elements) && !j.remark; } catch { return false; }
+}
+
 /** Only ordinary successful answers are kept: never an error, a redirect or an opaque answer. */
 async function store(kind, key, res) {
   if (res.status !== 200 || res.type === 'opaque' || res.type === 'opaqueredirect') return false;
+  if (!(await sound(kind, res))) return false;
   await (await caches.open(cacheName(kind))).put(key, await stamped(res));
   return true;
 }
@@ -119,14 +136,15 @@ const missing = () => new Response('Not saved on this device', { status: 404, st
 async function savedFirst(kind, request, ctx) {
   const offline = await isOffline();
   const cache = await caches.open(cacheName(kind));
-  const hit = await cache.match(request, { ignoreVary: true });
+  const key = keyFor(kind, request);
+  const hit = await cache.match(key, { ignoreVary: true });
   if (hit) {
     const age = now() - Number(hit.headers.get(STAMP) || 0);
     if (!offline && age > TTL[kind]) {
       // Old: show it now, and fetch a fresh one for next time.
       ctx.waitUntil(
         fetch(request, { cache: 'no-cache' })
-          .then(async (res) => { if (await store(kind, request, res)) await maybeTrim(kind); })
+          .then(async (res) => { if (await store(kind, key, res)) await maybeTrim(kind); })
           .catch(() => {}),
       );
     }
@@ -134,7 +152,7 @@ async function savedFirst(kind, request, ctx) {
   }
   if (offline) return missing();
   const res = await fetch(request); // throws when there is no connection: the map reports that tile as failed
-  if (res.status === 200) ctx.waitUntil(store(kind, request, res.clone()).then((saved) => saved && maybeTrim(kind)).catch(() => {}));
+  if (res.status === 200) ctx.waitUntil(store(kind, key, res.clone()).then((saved) => saved && maybeTrim(kind)).catch(() => {}));
   return res;
 }
 

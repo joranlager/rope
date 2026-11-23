@@ -20,8 +20,11 @@ export const MAX_ACCURACY_M = 60; // a rougher fix could name the wrong road
 // Kinds of way that are roads you can be "on". Not buildings, borders, rivers or railways.
 const ROADS = 'motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|service|pedestrian|track|road|footway|path|cycleway|steps|bridleway|motorway_link|trunk_link|primary_link|secondary_link|tertiary_link';
 
+// The point is rounded to 4 decimals (about 11 m) so that nearby questions are the same question and
+// share one saved answer; the radius grows by what the rounding can move the point.
+export const ROUND_SLACK_M = 10;
 export function roadQuery(lat, lon, radius = RADIUS_M, server = OVERPASS) {
-  const q = `[out:json][timeout:8];way(around:${radius},${lat.toFixed(6)},${lon.toFixed(6)})[highway~"^(${ROADS})$"];out tags geom;`;
+  const q = `[out:json][timeout:8];way(around:${Math.round(radius) + ROUND_SLACK_M},${lat.toFixed(4)},${lon.toFixed(4)})[highway~"^(${ROADS})$"];out tags geom;`;
   return `${server}?data=${encodeURIComponent(q)}`;
 }
 

@@ -475,7 +475,7 @@ function roadSubject() {
 async function updateRoad() {
   if (inspectOn) return; // a tapped road is on show
   const who = roadSubject();
-  if (!who || offlineOn() || navigator.onLine === false) return hideRoad();
+  if (!who) return hideRoad(); // offline, a saved answer may still be there; if not, the lookup fails quietly
   if (roadShownFor !== null && roadShownFor !== who.id) hideRoad(); // never show the previous person's road
   if (roadBusy || !shouldLookup(roadLast, Date.now(), who, haversineM)) return;
   roadBusy = true;
@@ -517,7 +517,6 @@ function setInspect(on) {
 }
 
 async function inspectAt(lat, lon) {
-  if (offlineOn() || navigator.onLine === false) { showToast('Road information needs a network'); return; }
   const mine = ++inspectSeq;
   const radius = tapRadiusM(map.getZoom(), lat);
   clearInspect();
@@ -530,7 +529,7 @@ async function inspectAt(lat, lon) {
   } catch (err) {
     if (mine !== inspectSeq) return;
     hideRoad();
-    showToast('Could not get road information. Try again.');
+    showToast(offlineOn() || navigator.onLine === false ? 'No saved road information here' : 'Could not get road information. Try again.');
     log.app('warn', `road info: ${err.message}`);
     return;
   }

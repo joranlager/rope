@@ -9,7 +9,7 @@ const north = (m) => 60 + m / 111320;
 
 test('the query asks for roads around the point', () => {
   const u = decodeURIComponent(roadQuery(60.1234567, 10.5));
-  assert.match(u, /around:25,60\.123457,10\.500000/);
+  assert.match(u, /around:35,60\.1235,10\.5000/);
   assert.match(u, /highway/);
 });
 

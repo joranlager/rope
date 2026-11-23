@@ -5,6 +5,7 @@ export const CACHE_LABELS = {
   'rope-osm-v1': 'Map tiles',
   'rope-dem-v1': 'Terrain tiles',
   'rope-elev-v1': 'Heights',
+  'rope-road-v1': 'Road lookups',
 };
 const TILE_CACHES = Object.keys(CACHE_LABELS);
 
