@@ -7,6 +7,7 @@
  *   osm    OpenStreetMap map tiles      saved as they are looked at; refreshed in the background after 7 days
  *   dem    Kartverket height tiles      saved as used (the 3D terrain); refreshed after 90 days
  *   elev   Kartverket height at a point saved as used
+ *   road   NVDB road data (Vegvesen)   saved as used; refreshed after 30 days
  * Nothing is downloaded ahead of time: only what has been looked at is kept, which is also what
  * OpenStreetMap's tile policy asks of apps. The routing service and the people relay are never
  * touched here; they need the network.
@@ -36,12 +37,13 @@ const CACHES = {
   osm: 'rope-osm-v1',
   dem: 'rope-dem-v1',
   elev: 'rope-elev-v1',
+  road: 'rope-road-v1',
   meta: 'rope-meta-v1',
 };
 const DAY = 24 * 60 * 60 * 1000;
-const TTL = { osm: 7 * DAY, dem: 90 * DAY, elev: 365 * DAY, lib: Infinity };
+const TTL = { osm: 7 * DAY, dem: 90 * DAY, elev: 365 * DAY, road: 30 * DAY, lib: Infinity };
 // Roughly: 5 000 map tiles of ~20 KB, 1 200 height tiles of ~66 KB, many tiny heights.
-const LIMITS = { osm: 5000, dem: 1200, elev: 4000 };
+const LIMITS = { osm: 5000, dem: 1200, elev: 4000, road: 2000 };
 const CONFIG = { shellTimeoutMs: 4000, trimEvery: 40 };
 const STAMP = 'x-rope-cached-at';
 const META_KEY = 'https://rope.invalid/offline-mode'; // a made-up address, used only as a key
@@ -58,6 +60,7 @@ function kindOf(url, origin) {
   if (u.hostname === 'tile.openstreetmap.org') return 'osm';
   if (u.hostname === 'wcs.geonorge.no' && u.pathname.startsWith('/skwms1/wcs.hoyde-dtm')) return 'dem';
   if (u.hostname === 'ws.geonorge.no' && u.pathname.startsWith('/hoydedata/')) return 'elev';
+  if (u.hostname === 'nvdbapiles.atlas.vegvesen.no' && /^\/(vegnett|vegobjekter)\/api\/v4\//.test(u.pathname)) return 'road';
   if (u.hostname === 'unpkg.com' && u.pathname.startsWith('/maplibre-gl@')) return 'lib';
   return null;
 }
@@ -89,12 +92,22 @@ async function setOffline(value) {
 async function stamped(res) {
   const headers = new Headers(res.headers);
   headers.set(STAMP, String(now()));
+  // The body below is already decoded, so these would now be wrong (and a stale length cuts the answer short).
+  headers.delete('content-encoding');
+  headers.delete('content-length');
   return new Response(await res.arrayBuffer(), { status: res.status, statusText: res.statusText, headers });
+}
+
+/** An answer that is not the expected JSON (an error page sent with 200, say) is never kept. */
+async function sound(kind, res) {
+  if (kind !== 'road') return true;
+  try { const j = await res.clone().json(); return Array.isArray(j) || Array.isArray(j?.objekter); } catch { return false; }
 }
 
 /** Only ordinary successful answers are kept: never an error, a redirect or an opaque answer. */
 async function store(kind, key, res) {
   if (res.status !== 200 || res.type === 'opaque' || res.type === 'opaqueredirect') return false;
+  if (!(await sound(kind, res))) return false;
   await (await caches.open(cacheName(kind))).put(key, await stamped(res));
   return true;
 }
@@ -119,14 +132,15 @@ const missing = () => new Response('Not saved on this device', { status: 404, st
 async function savedFirst(kind, request, ctx) {
   const offline = await isOffline();
   const cache = await caches.open(cacheName(kind));
-  const hit = await cache.match(request, { ignoreVary: true });
+  const key = request;
+  const hit = await cache.match(key, { ignoreVary: true });
   if (hit) {
     const age = now() - Number(hit.headers.get(STAMP) || 0);
     if (!offline && age > TTL[kind]) {
       // Old: show it now, and fetch a fresh one for next time.
       ctx.waitUntil(
         fetch(request, { cache: 'no-cache' })
-          .then(async (res) => { if (await store(kind, request, res)) await maybeTrim(kind); })
+          .then(async (res) => { if (await store(kind, key, res)) await maybeTrim(kind); })
           .catch(() => {}),
       );
     }
@@ -134,7 +148,7 @@ async function savedFirst(kind, request, ctx) {
   }
   if (offline) return missing();
   const res = await fetch(request); // throws when there is no connection: the map reports that tile as failed
-  if (res.status === 200) ctx.waitUntil(store(kind, request, res.clone()).then((saved) => saved && maybeTrim(kind)).catch(() => {}));
+  if (res.status === 200) ctx.waitUntil(store(kind, key, res.clone()).then((saved) => saved && maybeTrim(kind)).catch(() => {}));
   return res;
 }
 

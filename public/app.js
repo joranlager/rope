@@ -16,6 +16,7 @@ import { buildDistanceItems, visibleMidpoint, symmetricBounds } from './distance
 import { mountWheelPicker, wheelIsBusy, resetWheelActivity } from './wheel.js';
 import { registerDemProtocol } from './demprotocol.js';
 import * as offline from './offline.js';
+import { lookupRoad, nearestSaved, shouldLookup, tapRadiusM } from './road.js';
 import { PROTOCOL as DEM_PROTOCOL, DEM_MIN_ZOOM, DEM_MAX_ZOOM, EXAGGERATION, TILT } from './terrain.js';
 import {
   TRACE_COLORS, traceSettings, addPoint, trimToDistance, toFeature, labelForLength, metersOfLength,
@@ -166,12 +167,18 @@ function initMap() {
       layout: { 'line-cap': 'round' },
       paint: { 'line-color': ['get', 'color'], 'line-width': 2, 'line-opacity': 0.85, 'line-dasharray': [2, 2] },
     }, 'route-line');
+    map.addSource('inspect-road', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    map.addLayer({ id: 'inspect-line', type: 'line', source: 'inspect-road', filter: ['in', '$type', 'LineString'],
+      paint: { 'line-color': '#2563eb', 'line-width': 9, 'line-opacity': 0.4 }, layout: { 'line-cap': 'round', 'line-join': 'round' } });
+    map.addLayer({ id: 'inspect-point', type: 'circle', source: 'inspect-road', filter: ['==', '$type', 'Point'],
+      paint: { 'circle-radius': 6, 'circle-color': '#fff', 'circle-stroke-color': '#2563eb', 'circle-stroke-width': 3 } });
     renderTraces();
     renderDistances();
     applyTerrain(); // the 3D terrain, if it was left switched on
     if (terrainOn()) map.jumpTo({ pitch: TILT });
   });
   map.on('click', (e) => {
+    if (inspectOn) return inspectAt(e.lngLat.lat, e.lngLat.lng);
     if (routeMode) setDestination({ lat: e.lngLat.lat, lon: e.lngLat.lng });
   });
 
@@ -421,6 +428,7 @@ async function setOfflineMap(on, { quiet = false } = {}) {
   saveState();
   syncOfflineUi();
   offlineErrors = 0;
+  updateRoad();
   if (!quiet) showToast(on ? 'Offline map: using only what is saved on this device' : 'Back online');
   if (on) offline.keepStorage();
   if (mapReady) { // draw again with the new mode: saved tiles appear, missing ones stop being retried
@@ -439,6 +447,146 @@ async function startOffline() {
   // The worker remembers the mode too, but the page's own setting wins, so both always agree.
   try { if (offlineOn() !== (await offline.getOfflineMode())) await offline.setOfflineMode(offlineOn()); } catch { /* the worker starts on the next load */ }
   syncOfflineUi();
+}
+
+// ---------- road name ----------
+// Under the menu bar: the name of the road I am on, or the one the person I am following is on.
+// Nothing is shown when there is no road close enough, no network, or the position is too rough.
+
+let roadLast = null;
+let roadBusy = false;
+let roadShownFor = null;
+
+function hideRoad() {
+  roadShownFor = null;
+  $('#road').hidden = true;
+}
+
+/** Whose road to name: the person being followed, otherwise me. */
+function roadSubject() {
+  const c = state?.contacts[follow.target];
+  if (c) {
+    const pt = followedPoint();
+    return pt ? { id: c.id, lat: pt.lat, lon: pt.lon, acc: c.pos?.acc ?? null } : null;
+  }
+  return myPos ? { id: 'me', lat: myPos.lat, lon: myPos.lon, acc: myPos.acc } : null;
+}
+
+/** Road sequences saved on this device (the service worker keeps every answer), read back for offline use. */
+const savedRoads = new Map(); // sequence id -> segments
+async function readSavedRoads() {
+  if (typeof caches === 'undefined' || !(await caches.has('rope-road-v1'))) return [];
+  const cache = await caches.open('rope-road-v1');
+  for (const req of await cache.keys()) {
+    const id = /\/veglenkesekvenser\/segmentert\/(\d+)/.exec(req.url)?.[1];
+    if (!id || savedRoads.has(id)) continue;
+    try { savedRoads.set(id, await (await cache.match(req, { ignoreVary: true })).json()); } catch { /* unreadable: skip */ }
+  }
+  return [...savedRoads].map(([id, segments]) => ({ id, segments }));
+}
+
+/**
+ * The road at a position: from the service when there is a network, otherwise (airplane mode, Offline map,
+ * or a service that cannot be reached) from the roads already saved here, which covers any spot on a road
+ * looked at before. Throws if neither can answer.
+ */
+async function findRoad(lat, lon, radius = undefined, opts = {}) {
+  let failure = null;
+  if (offlineOn()) failure = new Error('Offline map is on and this road is not saved');
+  else {
+    try { return await lookupRoad(lat, lon, radius, opts); } catch (err) { failure = err; }
+  }
+  const local = nearestSaved(await readSavedRoads(), lat, lon, radius, opts);
+  if (local) return local;
+  throw failure;
+}
+
+async function updateRoad() {
+  if (inspectOn) return; // a tapped road is on show
+  const who = roadSubject();
+  if (!who) return hideRoad(); // offline, a saved answer may still be there; if not, the lookup fails quietly
+  if (roadShownFor !== null && roadShownFor !== who.id) hideRoad(); // never show the previous person's road
+  if (roadBusy || !shouldLookup(roadLast, Date.now(), who, haversineM)) return;
+  roadBusy = true;
+  roadLast = { lat: who.lat, lon: who.lon, at: Date.now(), id: who.id };
+  try {
+    const name = (await findRoad(who.lat, who.lon, undefined, { needLabel: true }))?.label ?? null;
+    if (roadSubject()?.id !== who.id) return; // the map moved on to someone else meanwhile
+    if (name) { $('#road').textContent = name; $('#road').hidden = false; roadShownFor = who.id; }
+    else hideRoad();
+  } catch {
+    if (roadShownFor === who.id) hideRoad(); // an old name could be wrong by now
+  } finally {
+    roadBusy = false;
+  }
+}
+
+// ---------- road info: the ? button ----------
+// Tap ?, then a spot on the map. If a road is there its name shows in the pill under the menu bar, with
+// a see-through card of facts and the road drawn on the map. Tap ? again to leave and go back to the
+// road I am on.
+
+let inspectOn = false;
+let inspectSeq = 0;
+
+function clearInspect() {
+  $('#road-info').hidden = true;
+  map?.getSource('inspect-road')?.setData({ type: 'FeatureCollection', features: [] });
+}
+
+function setInspect(on) {
+  inspectOn = on;
+  inspectSeq++;
+  document.body.classList.toggle('inspecting', on);
+  $('#inspect').setAttribute('aria-pressed', String(on));
+  clearInspect();
+  hideRoad();
+  if (on) showToast('Tap a spot on the map to see the road');
+  else { roadLast = null; updateRoad(); }
+}
+
+async function inspectAt(lat, lon) {
+  const mine = ++inspectSeq;
+  const radius = tapRadiusM(map.getZoom(), lat);
+  clearInspect();
+  map.getSource('inspect-road')?.setData({ type: 'Feature', geometry: { type: 'Point', coordinates: [lon, lat] }, properties: {} });
+  $('#road').textContent = 'Looking…';
+  $('#road').hidden = false;
+  let result;
+  try {
+    result = await findRoad(lat, lon, radius, { info: true, timeoutMs: 10000 });
+  } catch (err) {
+    if (mine !== inspectSeq) return;
+    hideRoad();
+    showToast(offlineOn() || navigator.onLine === false ? 'No saved road information here' : 'Could not get road information. Try again.');
+    log.app('warn', `road info: ${err.message}`);
+    return;
+  }
+  if (mine !== inspectSeq) return; // another tap, or the tool was switched off, meanwhile
+  if (!result) {
+    hideRoad();
+    showToast('No road here');
+    return;
+  }
+  $('#road').textContent = result.title;
+  const card = $('#road-info');
+  card.replaceChildren();
+  const h = document.createElement('h4');
+  h.textContent = result.title;
+  card.append(h);
+  for (const [k, v] of result.rows) {
+    const row = document.createElement('div');
+    row.className = 'ri-row';
+    const a = document.createElement('span'); a.textContent = k;
+    const b = document.createElement('b'); b.textContent = v;
+    row.append(a, b);
+    card.append(row);
+  }
+  card.hidden = false;
+  map.getSource('inspect-road')?.setData({ type: 'FeatureCollection', features: [
+    { type: 'Feature', geometry: { type: 'MultiLineString', coordinates: result.lines }, properties: {} },
+    { type: 'Feature', geometry: { type: 'Point', coordinates: [lon, lat] }, properties: {} },
+  ] });
 }
 
 // ---------- distances ----------// ---------- distances ----------
@@ -643,6 +791,7 @@ function setFollow(next, { recentre = false } = {}) {
   follow = next;
   lastFollowed = null;
   renderFollowUi();
+  updateRoad();
   if (recentre) moveToFollowed({ fresh: true });
 }
 
@@ -734,6 +883,7 @@ function onFix(p) {
   if (state && accuracy <= 100) recordTrail('me', { lat, lon, ts: Date.now() }); // skip very rough fixes
   maybeSendPosition();
   maybeUpdateTerrain();
+  updateRoad();
   renderContacts();
   renderDistances();
 }
@@ -947,7 +1097,7 @@ async function onPairMessage(id, text, via = 'relay') {
   if ('youAdminThem' in patch) showToast(patch.youAdminThem ? `${label(c)} approved: you are now their admin.` : `${label(c)} declined your admin request.`);
   if (msg.t === 'admin' && msg.on !== true && patch.adminOverMe === false) c.adminAnswer = null; // released
   Object.assign(c, patch);
-  if (patch.pos) recordTrail(id, { lat: patch.pos.lat, lon: patch.pos.lon, ts: patch.pos.ts });
+  if (patch.pos) { recordTrail(id, { lat: patch.pos.lat, lon: patch.pos.lon, ts: patch.pos.ts }); if (follow.target === id) updateRoad(); }
   if ('theirVisible' in patch && !seeingThem(c)) clearTrail(id); // they stopped sharing: their trail goes too
   saveState();
   renderAll();
@@ -1627,6 +1777,8 @@ async function startApp() {
   $('#measure').hidden = false;
   $('#heightmap').hidden = false;
   $('#offline').hidden = false;
+  $('#inspect').hidden = false;
+  setInterval(updateRoad, 4000); // also asks when a position stays put but the wait since the last question is over
   syncOfflineUi();
   startOffline();
   syncTerrainButton();
@@ -1712,6 +1864,7 @@ function wire() {
   });
   $('#follow-person').addEventListener('click', () => setFollow(pressPersonArrow(follow), { recentre: true }));
   $('#heightmap').addEventListener('click', () => setTerrain3D(!terrainOn()));
+  $('#inspect').addEventListener('click', () => setInspect(!inspectOn));
   $('#offline').addEventListener('click', () => setOfflineMap(!offlineOn()));
   $('#offline-switch').addEventListener('change', (e) => setOfflineMap(e.target.checked));
   $('#offline-clear').addEventListener('click', async () => {

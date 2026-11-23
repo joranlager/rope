@@ -135,6 +135,22 @@ must use the same one.
   - The app's files are fetched fresh when there is a network, so an update arrives at the next visit.
     Add it to the home screen for a full-screen app (a manifest and icon are included). iOS may clear
     saved data for sites not used for a while, so open the map again before a trip.
+- **Road name:** under the menu bar, the name of the road you are on, or of the person you are following
+  (the bottom-right arrow or Show). It comes from **NVDB**, the Norwegian road database of Statens vegvesen
+  (`nvdbapiles.atlas.vegvesen.no`, open, no key; it needs an `X-Client` header, which the app sends). The
+  nearest road within 25 m is looked up and named by its street, or by its number (E6, Rv 4, Fv 12) when it
+  has no street name. If there is no road that close, the fix is rough (worse than 60 m), or the place is
+  outside Norway, nothing is shown. Every answer is saved on the device (refreshed after 30 days). With no
+  network (airplane mode, or Offline map on) the app finds the road in the roads it has already saved, so
+  *any* spot on a road you have looked at before works, not only the exact spot; the speed limit and height
+  are missing then. A road you have never looked at online says "No saved road information here". It asks at most every 6 s and only after moving 25 m, and never shows the
+  previous person's road.
+  - **Ask about a road:** press the **?** button (top of the button stack on the right), then tap a spot on
+    the map. If a road is there, its name shows in the same pill and a see-through card lists what NVDB
+    knows (type, road number and reference, speed limit, lanes, height above sea level, length) while the
+    street is drawn on the map. If not, you are told "No road here". The tap reaches about 16 px around your
+    finger, at least 25 m. Press **?** again to leave; the road you are on returns.
+  - Road data: © Statens vegvesen (NVDB), licence NLOD.
 - **Scale:** a small scale line at the bottom left adapts as you zoom in and out.
 - **Colour:** each person, you included, has one colour, used for their map marker, avatar, arrow and trail.
   Pick it from the palette (or leave it on Auto) in their card, or under Me for yourself. It is set
@@ -397,6 +413,7 @@ public/demprotocol.js  makes the terrain tiles on demand for the map library
 public/sw.js       service worker: saves the app and the map parts as they are used (unit tested)
 public/offline.js  page side of offline maps: register, offline mode, what is saved
 public/manifest.webmanifest  + icons/  makes the app installable
+public/road.js     the road name lookup and when to ask (pure, tested)
 public/follow.js   what the map is following: me, a person, or all (pure, tested)
 public/colors.js   one colour per person and a visible glyph colour (pure, tested)
 public/trace.js    trails: trimming, jitter, colours, the wheel model (pure, tested)
