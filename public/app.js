@@ -14,10 +14,8 @@ import {
 import { personHex, contrastText } from './colors.js';
 import { buildDistanceItems, visibleMidpoint, symmetricBounds } from './distance.js';
 import { mountWheelPicker, wheelIsBusy, resetWheelActivity } from './wheel.js';
-import {
-  MIN_ZOOM as HM_MIN_ZOOM, MARGIN as HM_MARGIN, OPACITY as HM_OPACITY, MIN_GAP_MS as HM_MIN_GAP_MS,
-  withMargin, requestSize, getMapUrl, corners as imageCorners, intersectsCoverage, needsReload as heightNeedsReload,
-} from './heightmap.js';
+import { registerDemProtocol } from './demprotocol.js';
+import { PROTOCOL as DEM_PROTOCOL, DEM_MIN_ZOOM, DEM_MAX_ZOOM, EXAGGERATION, TILT } from './terrain.js';
 import {
   TRACE_COLORS, traceSettings, addPoint, trimToDistance, toFeature, labelForLength, metersOfLength,
   colorHex, hexToRgba,
@@ -124,7 +122,8 @@ function initMap() {
       layers: [{ id: 'osm', type: 'raster', source: 'osm' }],
     },
     center: [10.75, 59.91], zoom: 11,
-    attributionControl: false, // added below, so the height map's credit can be added and removed
+    attributionControl: false, // added below, so the terrain's credit can be added and removed
+    maxPitch: 75,             // the camera can be tilted well down for the 3D terrain
   });
   setAttribution(false);
   map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-left');
@@ -133,7 +132,12 @@ function initMap() {
 
   // Put the first map error on screen with the build id, so a blank map can be diagnosed from a phone.
   let mapErrorShown = false;
+  let terrainErrors = 0;
   map.on('error', (e) => {
+    if (e.sourceId === 'terrain-dem') { // a terrain tile that could not be made: the ground is flat there for now
+      if (++terrainErrors === 1) setStatus('Some terrain data could not be loaded');
+      return; // not the red "map problem" banner, which is for the base map
+    }
     if (mapErrorShown) return;
     mapErrorShown = true;
     const detail = String(e?.error?.message || e?.error || 'unknown error').slice(0, 120);
@@ -159,7 +163,8 @@ function initMap() {
     }, 'route-line');
     renderTraces();
     renderDistances();
-    if (heightmapOn()) refreshHeightmap({ force: true });
+    applyTerrain(); // the 3D terrain, if it was left switched on
+    if (terrainOn()) map.jumpTo({ pitch: TILT });
   });
   map.on('click', (e) => {
     if (routeMode) setDestination({ lat: e.lngLat.lat, lon: e.lngLat.lng });
@@ -167,7 +172,8 @@ function initMap() {
 
   // Dragging the map by hand stops following. The map's own animated moves don't fire dragstart.
   map.on('dragstart', () => setFollow(dragged(follow)));
-  map.on('moveend', () => { programmaticMove = false; if (heightmapOn()) scheduleHeightmap(); });
+  map.on('moveend', () => { programmaticMove = false; });
+  map.on('zoomend', noteTerrainZoom);
   map.on('move', placeDistanceLabels);
   // Resizing the window (or turning the phone) keeps following whatever is being followed.
   map.on('resize', () => { if (follow.target !== null) moveToFollowed({ force: true }); });
@@ -289,142 +295,87 @@ function setTrace(id, patch) {
   renderAll();
 }
 
-// ---------- height map ----------
-// The height map button overlays Kartverket's coloured terrain heights (hoydedata.no). Off by
-// default; the choice is remembered. One image covers the visible map area (plus a margin), because
-// the service fits its colours to each request and tiles would not match along their edges. A new
-// image is requested only when the screen leaves the loaded one or the zoom changes a good way.
-// Details and the service checks are in heightmap.js.
+// ---------- 3D terrain ----------
+// The terrain button draws the ordinary map in 3D: the OpenStreetMap map is draped over the real
+// terrain model from hoydedata.no (Kartverket), with a light hillshade, and the camera is tilted so
+// the relief shows. Off by default; the choice is remembered. The heights come from Kartverket's
+// elevation service, turned into MapLibre height tiles on demand (terrain.js, demprotocol.js).
+// Below zoom 8 and outside the area the service covers the ground is flat.
 
-const HM = { loaded: null, token: 0, abort: null, timer: null, lastAt: 0, urls: [], noted: '' };
 let attributionControl = null;
+let demNoted = false;
 
-const heightmapOn = () => state?.showHeightmap === true;
+const terrainOn = () => state?.showHeightmap === true;
 
-/** The map's credits: OpenStreetMap always, and Kartverket while the height map is shown. */
-function setAttribution(heightOn) {
+/** The map's credits: OpenStreetMap always, and Kartverket while the 3D terrain is on. */
+function setAttribution(terrain) {
   if (attributionControl) map.removeControl(attributionControl);
   attributionControl = new maplibregl.AttributionControl({
     compact: true,
-    customAttribution: heightOn ? 'Height map © <a href="https://www.kartverket.no/" target="_blank" rel="noopener">Kartverket</a> (hoydedata.no)' : undefined,
+    customAttribution: terrain ? 'Terrain © <a href="https://www.kartverket.no/" target="_blank" rel="noopener">Kartverket</a> (hoydedata.no)' : undefined,
   });
   map.addControl(attributionControl, 'bottom-right');
 }
 
-const viewBounds = () => { const b = map.getBounds(); return { west: b.getWest(), south: b.getSouth(), east: b.getEast(), north: b.getNorth() }; };
-
-/** Takes the overlay off the map and cancels anything in flight. */
-function removeHeightmap() {
-  HM.abort?.abort();
-  HM.abort = null;
-  HM.token++; // anything still arriving is out of date
-  clearTimeout(HM.timer);
-  HM.timer = null;
-  HM.loaded = null;
-  if (map?.getLayer('heightmap')) map.removeLayer('heightmap');
-  if (map?.getSource('heightmap')) map.removeSource('heightmap');
-  for (const u of HM.urls) URL.revokeObjectURL(u);
-  HM.urls = [];
-}
-
-// Asked for when the map stops moving. At most one request waits at a time, so a walk that keeps
-// the map moving still refreshes the overlay now and then.
-function scheduleHeightmap(delay = 800) {
-  if (HM.timer) return;
-  HM.timer = setTimeout(() => { HM.timer = null; refreshHeightmap(); }, delay);
-}
-
-/** Say once why nothing is shown, instead of leaving a silent blank. */
-function noteHeightmap(reason, text) {
-  if (HM.noted === reason) return;
-  HM.noted = reason;
-  showToast(text);
-}
-
-async function refreshHeightmap({ force = false } = {}) {
-  if (!heightmapOn() || !map || !mapReady) return;
-  const view = viewBounds();
-  const zoom = map.getZoom();
-  if (zoom < HM_MIN_ZOOM) { removeHeightmapImage(); return noteHeightmap('zoom', 'Zoom in to see the height map'); }
-  if (!intersectsCoverage(view)) { removeHeightmapImage(); return noteHeightmap('area', 'The height map covers Norway and its surroundings'); }
-  HM.noted = '';
-  if (!force && !heightNeedsReload(HM.loaded, view, zoom)) return;
-  const wait = HM_MIN_GAP_MS - (Date.now() - HM.lastAt);
-  if (!force && wait > 0) { scheduleHeightmap(wait + 50); return; } // not more often than the service should be asked
-
-  const bounds = withMargin(view, HM_MARGIN);
-  const canvas = map.getCanvas();
-  const url = getMapUrl(bounds, requestSize(canvas.clientWidth, canvas.clientHeight, HM_MARGIN));
-  HM.abort?.abort();
-  const ctrl = new AbortController();
-  HM.abort = ctrl;
-  const token = ++HM.token;
-  HM.lastAt = Date.now();
-
-  let blob;
-  try {
-    const res = await fetch(url, { signal: ctrl.signal });
-    // The service answers an unsupported request with JSON and a 200, so check what came back is a picture.
-    if (!res.ok || !(res.headers.get('content-type') || '').startsWith('image/')) throw new Error(`the service answered ${res.status}`);
-    blob = await res.blob();
-  } catch (err) {
-    if (err.name === 'AbortError' || token !== HM.token) return; // replaced by a newer request, or switched off
-    log.app('warn', `height map: ${err.message}`);
-    setStatus('Height map unavailable');
-    return;
-  }
-  if (token !== HM.token || !heightmapOn()) return;
-
-  const objectUrl = URL.createObjectURL(blob);
-  HM.urls.push(objectUrl);
-  const coordinates = imageCorners(bounds);
-  if (map.getSource('heightmap')) {
-    map.getSource('heightmap').updateImage({ url: objectUrl, coordinates });
+/** Makes the map match the switch: terrain, its height tiles and its hillshade on, or all off. */
+function applyTerrain() {
+  if (!map || !mapReady) return;
+  if (terrainOn()) {
+    if (!map.getSource('terrain-dem')) {
+      map.addSource('terrain-dem', {
+        type: 'raster-dem', tiles: [`${DEM_PROTOCOL}://{z}/{x}/{y}`], tileSize: 256,
+        minzoom: DEM_MIN_ZOOM, maxzoom: DEM_MAX_ZOOM, encoding: 'terrarium',
+      });
+    }
+    if (!map.getLayer('hillshade')) {
+      // Just above the base map, under the trails, lines and route. Light, so the map stays the map.
+      const above = map.getStyle().layers.find((l) => l.id !== 'osm' && l.id !== 'hillshade')?.id;
+      map.addLayer({
+        id: 'hillshade', type: 'hillshade', source: 'terrain-dem',
+        paint: { 'hillshade-exaggeration': 0.35, 'hillshade-shadow-color': '#2b2b3a', 'hillshade-highlight-color': '#ffffff', 'hillshade-accent-color': '#44445a' },
+      }, above);
+    }
+    map.setTerrain({ source: 'terrain-dem', exaggeration: EXAGGERATION });
   } else {
-    map.addSource('heightmap', { type: 'image', url: objectUrl, coordinates });
-    // Just above the base map, under the trails, lines and route.
-    const above = map.getStyle().layers.find((l) => l.id !== 'osm')?.id;
-    map.addLayer({
-      id: 'heightmap', type: 'raster', source: 'heightmap',
-      paint: { 'raster-opacity': HM_OPACITY, 'raster-fade-duration': 0 },
-    }, above);
+    map.setTerrain(null);
+    if (map.getLayer('hillshade')) map.removeLayer('hillshade');
+    if (map.getSource('terrain-dem')) map.removeSource('terrain-dem');
   }
-  HM.loaded = { bounds, zoom };
-  while (HM.urls.length > 2) URL.revokeObjectURL(HM.urls.shift()); // the older pictures are no longer needed
 }
 
-/** Takes the picture away but keeps the switch on (zoomed out too far, or looking elsewhere). */
-function removeHeightmapImage() {
-  HM.abort?.abort();
-  HM.token++;
-  HM.loaded = null;
-  if (map.getLayer('heightmap')) map.removeLayer('heightmap');
-  if (map.getSource('heightmap')) map.removeSource('heightmap');
+/** Say once why the ground is flat when it is, instead of leaving a silent 2D map. */
+function noteTerrainZoom() {
+  if (!terrainOn() || !map) return;
+  if (map.getZoom() < DEM_MIN_ZOOM) {
+    if (!demNoted) { demNoted = true; showToast('Zoom in to see the terrain in 3D'); }
+  } else {
+    demNoted = false;
+  }
 }
 
-function syncHeightmapButton() {
-  const on = heightmapOn();
+function syncTerrainButton() {
+  const on = terrainOn();
   const btn = $('#heightmap');
   btn.setAttribute('aria-pressed', String(on));
-  btn.title = on ? 'Hide the height map' : 'Show the height map';
+  btn.title = on ? 'Hide the 3D terrain' : 'Show the map in 3D';
   btn.setAttribute('aria-label', btn.title);
 }
 
-function setHeightmap(on) {
+function setTerrain3D(on) {
   state.showHeightmap = on; // off by default
   saveState();
-  syncHeightmapButton();
+  syncTerrainButton();
   setAttribution(on);
-  HM.noted = '';
+  demNoted = false;
+  applyTerrain();
+  map.easeTo({ pitch: on ? TILT : 0, duration: 900 }, APP_MOVE);
   if (on) {
-    showToast('Height map: colours are fitted to what is on screen');
-    refreshHeightmap({ force: true });
-  } else {
-    removeHeightmap();
+    showToast(map.getZoom() < DEM_MIN_ZOOM ? 'Zoom in to see the terrain in 3D' : '3D terrain: tilt with two fingers, or right-drag');
+    demNoted = map.getZoom() < DEM_MIN_ZOOM;
   }
 }
 
-// ---------- distances ----------
+// ---------- distances ----------// ---------- distances ----------
 // The measure-tape button toggles a live view of the direct distance from me to each person
 // on the map: a dashed line in their colour with the distance at its middle. Off by default,
 // and the choice is remembered. A label is only shown for people who are visible on the map.
@@ -554,7 +505,7 @@ function fitEveryone({ force = false } = {}) {
   const none = { top: 0, left: 0, right: 0, bottom: 0 };
   if (!others.length) {
     programmaticMove = true;
-    map.easeTo({ center: me, zoom: Math.max(map.getZoom(), 15), padding: { ...none, bottom }, duration: 600 }, APP_MOVE);
+    map.easeTo({ center: me, zoom: Math.max(map.getZoom(), 15), padding: { ...none, bottom }, ...(terrainOn() ? { pitch: 0 } : {}), duration: 600 }, APP_MOVE);
     return;
   }
   const camera = map.cameraForBounds(symmetricBounds(me, others), {
@@ -567,7 +518,8 @@ function fitEveryone({ force = false } = {}) {
   const there = map.project(camera.center);
   if (!force && Math.hypot(here.x - there.x, here.y - there.y) < 1 && Math.abs(map.getZoom() - camera.zoom) < 0.01) return;
   programmaticMove = true;
-  map.easeTo({ center: camera.center, zoom: camera.zoom, padding: none, duration: 500 }, APP_MOVE);
+  // "All" is a view from above (the fit is worked out for a flat camera), so the tilt is lifted while the terrain is on.
+  map.easeTo({ center: camera.center, zoom: camera.zoom, padding: none, ...(terrainOn() ? { pitch: 0 } : {}), duration: 500 }, APP_MOVE);
 }
 
 /**
@@ -1607,8 +1559,8 @@ async function startApp() {
   $('#follow-me').hidden = false;
   $('#measure').hidden = false;
   $('#heightmap').hidden = false;
-  syncHeightmapButton();
-  if (heightmapOn()) { setAttribution(true); if (mapReady) refreshHeightmap({ force: true }); }
+  syncTerrainButton();
+  if (terrainOn()) setAttribution(true);
   renderDistances();
   renderFollowUi();
   startGps(); // first, so a failure further down can't leave location unasked
@@ -1689,7 +1641,7 @@ function wire() {
     setFollow(followMe(follow), { recentre: true });
   });
   $('#follow-person').addEventListener('click', () => setFollow(pressPersonArrow(follow), { recentre: true }));
-  $('#heightmap').addEventListener('click', () => setHeightmap(!heightmapOn()));
+  $('#heightmap').addEventListener('click', () => setTerrain3D(!terrainOn()));
   $('#measure').addEventListener('click', () => {
     state.showDistances = state.showDistances !== true; // off by default
     saveState();
@@ -1807,6 +1759,7 @@ function bootstrap() {
   const build = $('#build');
   if (build.textContent.startsWith('__')) build.textContent = 'dev'; // not replaced by the Pages build
   populateProfiles();
+  registerDemProtocol(maplibregl, { log: (level, text) => log.app(level, text) }); // 3D terrain tiles, made on demand
   initMap();
   wire();
   state = loadState();

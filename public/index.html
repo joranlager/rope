@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="Rope">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data: blob: https://tile.openstreetmap.org; connect-src https: blob:; worker-src blob:">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data: blob: https://tile.openstreetmap.org; connect-src https:; worker-src blob:">
   <title>Rope</title>
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
   <link rel="stylesheet" href="style.css">
@@ -70,8 +70,8 @@
     <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M21 3 3 10.5l7 2.5 2.5 7z"/></svg>
   </button>
   <!-- Measure tape: toggles live distances from me to each person on the map. Off by default. -->
-  <!-- Height map: overlays Kartverket's coloured terrain heights (hoydedata.no). Off by default. -->
-  <button id="heightmap" class="fab fab-tool fab-height" type="button" aria-label="Show the height map" aria-pressed="false" hidden>
+  <!-- 3D terrain: the ordinary map draped over Kartverket's terrain model (hoydedata.no), tilted. Off by default. -->
+  <button id="heightmap" class="fab fab-tool fab-height" type="button" aria-label="Show the map in 3D" aria-pressed="false" hidden>
     <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <path d="M2.5 19.5 9 8l4 6.5 2.5-3.5 6 8.5z"/>
       <path d="M6.2 19.5c1.2-2 3-3 5-3M13 19.5c.9-1.4 2.2-2.2 3.7-2.2"/>
