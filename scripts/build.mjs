@@ -22,7 +22,10 @@ async function files(dir, base = '') {
   }
   return out;
 }
-const precache = ['./', ...(await files('dist')).filter((f) => f !== 'sw.js' && f !== '.nojekyll' && f !== 'index.html').sort()];
+// The ship inspector (with three.js, ~0.7 MB) is left out: it is saved the first time someone opens it,
+// so phones that only use the map never download it.
+const onDemand = (f) => f.startsWith('ships/') || f === 'vendor/three.js';
+const precache = ['./', ...(await files('dist')).filter((f) => f !== 'sw.js' && f !== '.nojekyll' && f !== 'index.html' && !onDemand(f)).sort()];
 const sw = await readFile('dist/sw.js', 'utf8');
 await writeFile('dist/sw.js', sw
   .replace("'__BUILD__'", JSON.stringify(build))

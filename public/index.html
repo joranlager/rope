@@ -11,7 +11,7 @@
   <meta name="apple-mobile-web-app-title" content="Rope">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="apple-touch-icon" href="icons/icon-180.png">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data: blob: https://tile.openstreetmap.org; connect-src https:; worker-src 'self' blob:">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data: blob: https://tile.openstreetmap.org https://commons.wikimedia.org https://upload.wikimedia.org https://thumb.wikimedia.org; connect-src https:; worker-src 'self' blob:">
   <title>Rope</title>
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
   <link rel="stylesheet" href="style.css">
@@ -47,6 +47,8 @@
   </div>
 
   <div id="map" aria-label="Map"></div>
+  <!-- Ships: the 3D ship inspector, built here by ships/ui.js the first time it is opened -->
+  <div id="ships" hidden></div>
 
   <header class="topbar">
     <button id="brand" class="brand" type="button" aria-label="Rope. Tap four times to reload the app." title="Tap four times to reload">Rope</button>
@@ -54,6 +56,7 @@
       <button class="menu-btn" data-tab="people" aria-pressed="false">People<span id="req-badge" class="badge" hidden></span></button>
       <button class="menu-btn" data-tab="route" aria-pressed="false">Route</button>
       <button class="menu-btn" data-tab="me" aria-pressed="false">Me</button>
+      <button id="menu-ships" class="menu-btn" data-action="ships" aria-pressed="false" title="Ship inspector">Ships</button>
       <button id="menu-all" class="menu-btn" data-action="all" aria-pressed="false" title="Show everyone on the map">All</button>
     </nav>
     <div id="status" class="status" role="status" aria-live="polite" data-tone="idle" data-conn="idle"><i class="status-dot" aria-hidden="true"></i><span id="status-text" class="status-text">Starting…</span></div>

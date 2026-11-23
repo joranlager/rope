@@ -4,11 +4,13 @@ A single-page web app with no backend of its own. It shows your GPS position on 
 OpenStreetMap map, shares live positions with a circle of trusted people, shows the distance to
 each of them in metres, adds terrain heights from hoydedata, and plans routes.
 
+It also has **Ships** in the top menu: a 3D ship inspector (see [Ships](#ships)).
+
 It is plain static files, so it runs on GitHub Pages.
 
 ```bash
 npm start      # http://localhost:8080 (local static server)
-npm test       # crypto, visibility/admin rules, distance
+npm test       # crypto, visibility/admin rules, distance, ship inspector
 npm run build  # copies public/ to dist/
 ```
 
@@ -411,6 +413,33 @@ The CPace construction follows the CFRG draft in structure (generator from the p
 session id, ephemeral shares, transcript-bound key, explicit confirmation) but is not a byte-exact
 implementation of it.
 
+## Ships
+
+**Ships** in the top menu covers the map with a 3D ship inspector. Close it with the same button, the
+× in its sheet, or Escape; any other menu entry brings the map back.
+
+- **Find a ship**: search Wikidata (SPARQL, limited to ships, boats and ship classes) and see its facts:
+  type, class, dimensions, tonnage, speed, builder, operator, flag, home port, IMO/MMSI, service dates.
+  Photos come from Wikimedia Commons: the item's own image, its Commons category and a text search.
+- **Build**: the hull is rebuilt from length, beam, draft, depth and fullness, with a bulbous, raked,
+  plumb or clipper bow and a transom or cruiser stern. Deckhouses, funnels, masts, cargo and sails are
+  generated for the vessel type (container ship, tanker, bulk, cargo, cruise ship, ferry, liner,
+  warship, aircraft carrier, sailing ship, yacht, tug). Values missing on Wikidata are estimated from
+  typical ships and marked *est.*; everything can be changed by hand.
+- **Livery**: the colours are read from a photo (k-means, with sky and water left out) and put on the
+  hull, boot-top, superstructure, funnel and stripe; each can be changed. The ship's name, port of
+  registry, a side name, the IMO number, draft marks and the load-line mark are painted on the hull.
+- **Look**: studio, at sea (sea state, speed with a wake, sun height; the ship heaves, pitches and
+  rolls with the waves) and under water. Dimension lines show length, beam, draft and air draft, in
+  metres or feet.
+- **Export**: Wavefront `.obj` + `.mtl` + the painted hull pictures (metres, Y up, bow towards +X),
+  a picture of the view, or the hull paint.
+
+It is loaded the first time it is opened, and kept for offline use from then on; phones that only
+use the map never download it (three.js is about 0.7 MB). Wikidata and Commons are called directly
+from the browser, so they need a network. The rebuilt ships are close look-alikes, not naval
+architecture.
+
 ## Limits and things to verify
 
 - **Not yet exercised against live services.** The build environment couldn't reach ntfy.sh,
@@ -435,7 +464,7 @@ public/net.js      ntfy publish/subscribe
 public/qrlink.js   the QR codes for connecting without a server: make, read, check (pure, tested)
 public/p2p.js      direct WebRTC link per contact: compact offer/answer codes, hole punching
 public/pake.js     pairing with a number: CPace PAKE over the relay
-public/vendor/     bundled libraries (@noble/curves, jsQR, qrcode-generator), built by npm run vendor
+public/vendor/     bundled libraries (@noble/curves, jsQR, qrcode-generator, three.js), built by npm run vendor
 public/debug.js    debug overlay and its event log (four taps on All)
 public/social.js   pure visibility and admin rules (unit tested)
 public/geo.js      haversine, elevation helpers
@@ -452,6 +481,17 @@ public/colors.js   one colour per person and a visible glyph colour (pure, teste
 public/trace.js    trails: trimming, jitter, colours, the wheel model (pure, tested)
 public/wheel.js    the two-wheel number + unit picker
 public/boot.js     picks the splash before first paint
+public/ships/      the ship inspector, loaded on demand from the Ships menu:
+  ui.js            the screen and its sheet (Ship, Build, Livery, Sea, Export)
+  wikidata.js      SPARQL search and facts    commons.js  photos from Wikimedia Commons
+  presets.js       vessel types, proportions, liveries; Wikidata facts to hull parameters (pure, tested)
+  hull.js          the procedural hull surface (HullShape is pure, tested) and its meshes
+  ship.js          the whole ship: deckhouses, funnels, masts, cargo, sails, materials
+  hullText.js      hull paint and lettering      livery.js  colours from a photo
+  scene.js         three.js scene, camera, studio / ocean / underwater   ocean.js  waves and buoyancy
+  callouts.js      3D dimension lines            objExport.js  OBJ + MTL export
+  ships.css        its styles (loaded with it)
+public/vendor/three.js  three.js and the add-ons the inspector uses, built by npm run vendor
 ```
 
 Every branch builds with `.github/workflows/pages.yml` and deploys to GitHub Pages. All branches

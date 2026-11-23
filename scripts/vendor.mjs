@@ -2,7 +2,7 @@
 // The output is committed, so the site needs no CDN and no install step to deploy.
 import { build } from 'esbuild';
 
-for (const name of ['noble', 'jsqr', 'qrcode']) {
+for (const name of ['noble', 'jsqr', 'qrcode', 'three']) {
   await build({
     entryPoints: [`scripts/vendor/${name}.js`],
     outfile: `public/vendor/${name}.js`,

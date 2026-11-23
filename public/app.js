@@ -2036,6 +2036,7 @@ let closeTimer = null;
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 function openPanel(name) {
+  closeShips();
   openTab = name;
   const panel = $('#panel');
   clearTimeout(closeTimer);
@@ -2091,6 +2092,38 @@ function enableSheetDrag() {
 }
 
 const togglePanel = (name) => (openTab === name ? closePanel() : openPanel(name));
+
+// ---------- ships ----------
+
+// "Ships" in the top menu covers the map with the 3D ship inspector (public/ships/). It is loaded the
+// first time it is opened, so the map never waits for three.js, and it stops drawing while closed.
+let ships = null; // the inspector once built
+let shipsLoading = null;
+const shipsOpen = () => !$('#ships').hidden;
+
+async function openShips() {
+  if (openTab !== null) closePanel();
+  $('#ships').hidden = false;
+  $('#menu-ships').setAttribute('aria-pressed', 'true');
+  if (ships) { ships.resume(); return; }
+  if (!shipsLoading) {
+    showToast('Loading the ship inspector…');
+    shipsLoading = import('./ships/ui.js')
+      .then((m) => { ships = m.createShipInspector($('#ships'), { onClose: closeShips }); $('#toast').hidden = true; })
+      .catch((err) => { shipsLoading = null; closeShips(); showToast(`Could not load the ship inspector: ${err.message}`); });
+  }
+  await shipsLoading;
+  if (!shipsOpen()) ships?.pause(); // closed again while it was loading
+}
+
+function closeShips() {
+  if (!shipsOpen()) return;
+  $('#ships').hidden = true;
+  $('#menu-ships').setAttribute('aria-pressed', 'false');
+  ships?.pause();
+}
+
+const toggleShips = () => (shipsOpen() ? closeShips() : openShips());
 
 
 // ---------- debug overlay ----------
@@ -2365,7 +2398,13 @@ function wire() {
     if (!myPos) { startGps(); setStatus('Waiting for your location…'); }
     setFollow(followAll(follow), { recentre: true });
   });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePanel(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    // Escape in a field of the ship inspector only leaves the field.
+    if (shipsOpen()) { if (!e.target.closest?.('#ships input, #ships select')) closeShips(); return; }
+    closePanel();
+  });
+  $('#menu-ships').addEventListener('click', toggleShips);
 
   $('#visible').addEventListener('change', (e) => {
     state.visible = e.target.checked;
