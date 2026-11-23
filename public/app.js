@@ -17,6 +17,10 @@ import { mountWheelPicker, wheelIsBusy, resetWheelActivity } from './wheel.js';
 import { registerDemProtocol } from './demprotocol.js';
 import * as offline from './offline.js';
 import { lookupRoad, nearestSaved, shouldLookup, tapRadiusM } from './road.js';
+import {
+  normalizeZone, toWire, zonesPayload, zonesFor, sameZones, standing, warnings, warningText, zoneFeatures,
+  newZoneId, findPlaces, KINDS, MIN_R, MAX_R, MAX_ZONES,
+} from './zones.js';
 import { PROTOCOL as DEM_PROTOCOL, DEM_MIN_ZOOM, DEM_MAX_ZOOM, EXAGGERATION, TILT } from './terrain.js';
 import {
   TRACE_COLORS, traceSettings, addPoint, trimToDistance, toFeature, labelForLength, metersOfLength,
@@ -167,17 +171,29 @@ function initMap() {
       layout: { 'line-cap': 'round' },
       paint: { 'line-color': ['get', 'color'], 'line-width': 2, 'line-opacity': 0.85, 'line-dasharray': [2, 2] },
     }, 'route-line');
+    map.addSource('zones', { type: 'geojson', data: zoneFeatures([]) });
+    map.addLayer({ id: 'zones-fill', type: 'fill', source: 'zones',
+      paint: { 'fill-color': ['match', ['get', 'kind'], 'no', '#ff3b30', '#34c759'], 'fill-opacity': ['+', 0.05, ['*', ['get', 's'], 0.38]] } }, 'route-line');
+    map.addLayer({ id: 'zones-line', type: 'line', source: 'zones',
+      paint: { 'line-color': ['match', ['get', 'kind'], 'no', '#ff3b30', '#34c759'], 'line-width': 1.5, 'line-opacity': ['+', 0.18, ['*', ['get', 's'], 0.6]] } }, 'route-line');
+    map.addSource('zone-draft', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    map.addLayer({ id: 'zone-draft-fill', type: 'fill', source: 'zone-draft', filter: ['==', '$type', 'Polygon'], paint: { 'fill-color': '#007aff', 'fill-opacity': 0.12 } });
+    map.addLayer({ id: 'zone-draft-line', type: 'line', source: 'zone-draft', filter: ['==', '$type', 'Polygon'], paint: { 'line-color': '#007aff', 'line-width': 2, 'line-dasharray': [2, 2] } });
+    map.addLayer({ id: 'zone-draft-point', type: 'circle', source: 'zone-draft', filter: ['==', '$type', 'Point'], paint: { 'circle-radius': 6, 'circle-color': '#fff', 'circle-stroke-color': '#007aff', 'circle-stroke-width': 3 } });
     map.addSource('inspect-road', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
     map.addLayer({ id: 'inspect-line', type: 'line', source: 'inspect-road', filter: ['in', '$type', 'LineString'],
       paint: { 'line-color': '#2563eb', 'line-width': 9, 'line-opacity': 0.4 }, layout: { 'line-cap': 'round', 'line-join': 'round' } });
     map.addLayer({ id: 'inspect-point', type: 'circle', source: 'inspect-road', filter: ['==', '$type', 'Point'],
       paint: { 'circle-radius': 6, 'circle-color': '#fff', 'circle-stroke-color': '#2563eb', 'circle-stroke-width': 3 } });
     renderTraces();
+    renderZones();
+    renderDraft();
     renderDistances();
     applyTerrain(); // the 3D terrain, if it was left switched on
     if (terrainOn()) map.jumpTo({ pitch: TILT });
   });
   map.on('click', (e) => {
+    if (zonePicking) return placeZone(e.lngLat.lat, e.lngLat.lng);
     if (inspectOn) return inspectAt(e.lngLat.lat, e.lngLat.lng);
     if (routeMode) setDestination({ lat: e.lngLat.lat, lon: e.lngLat.lng });
   });
@@ -589,6 +605,224 @@ async function inspectAt(lat, lon) {
   ] });
 }
 
+// ---------- zones ----------
+// An admin defines "no fly" zones (keep out) and "green field" zones (stay in) as circles, by tapping the
+// map, using their position, or an address with a perimeter. A zone is for everyone they are admin over,
+// or for chosen people. The zones that apply to a person are signed and sent to that person's phone,
+// where they are shown and checked, and cannot be removed while that admin holds the rights.
+// Each zone shows faintly in red or green; it grows stronger as the person nears a no fly zone, and a
+// warning covers the width of the screen. The admin sees the same for the people they watch over.
+
+const myZones = () => (state.zones ??= []);
+const adminsOverMe = () => activeContacts().filter((c) => c.adminOverMe);
+const myWards = () => activeContacts().filter((c) => c.youAdminThem);
+const zoneInfo = (z) => `${z.kind === 'no' ? 'No fly' : 'Green field'} · ${z.r >= 1000 ? `${(z.r / 1000).toFixed(z.r % 1000 ? 1 : 0)} km` : `${z.r} m`}`;
+
+function renderZones() {
+  if (!state || !mapReady) return;
+  const features = [];
+  const alerts = [];
+  // zones my admins set for me, checked against my position
+  const given = adminsOverMe().flatMap((a) => (a.zones ?? []).map((z) => ({ ...z, id: `${a.id}:${z.id}` })));
+  for (const z of given) features.push({ zone: z, strength: myPos ? standing(z, myPos).strength : 0 });
+  if (myPos) for (const w of warnings(given, myPos)) alerts.push({ w, who: null });
+  // zones I set, checked against where the people they apply to are
+  const level = new Map();
+  for (const c of myWards()) {
+    const set = zonesFor(myZones(), c);
+    const pos = c.pos && !isStale(c.pos) && seeingThem(c) ? c.pos : null;
+    if (!set.length || !pos) continue;
+    for (const z of set) level.set(z.id, Math.max(level.get(z.id) ?? 0, standing(z, pos).strength));
+    for (const w of warnings(set, pos)) alerts.push({ w, who: label(c) });
+  }
+  for (const z of myZones()) {
+    const n = normalizeZone(z);
+    if (n) features.push({ zone: n, strength: level.get(z.id) ?? 0 });
+  }
+  map.getSource('zones')?.setData(zoneFeatures(features));
+  showZoneAlert(alerts);
+}
+
+const LEVEL_RANK = { danger: 0, warn: 1, note: 2 };
+function showZoneAlert(alerts) {
+  const pill = $('#zone-pill');
+  if (!alerts.length) { pill.hidden = true; return; }
+  alerts.sort((a, b) => LEVEL_RANK[a.w.level] - LEVEL_RANK[b.w.level] || a.w.metres - b.w.metres);
+  const top = alerts[0];
+  pill.dataset.level = top.w.level;
+  pill.dataset.kind = top.w.zone.kind;
+  pill.replaceChildren(document.createTextNode(`${top.w.level === 'danger' ? '⚠ ' : ''}${warningText(top.w, top.who)}`));
+  if (alerts.length > 1) {
+    const more = document.createElement('small');
+    more.textContent = `+ ${alerts.length - 1} more warning${alerts.length > 2 ? 's' : ''}`;
+    pill.append(more);
+  }
+  pill.hidden = false;
+}
+
+/** The zones sent to one person: signed by me, kept so it can be sent again until it has arrived. */
+async function sendZones(c) {
+  if (!c.youAdminThem) return;
+  const set = zonesFor(myZones(), c);
+  if (c.zonesOut ? sameZones(c.zonesOut.zones, set) : set.length === 0) return;
+  const ts = Math.max(Date.now(), (c.zonesOut?.ts ?? 0) + 1);
+  const sig = await signObj(keys.ecdsa, zonesPayload(ts, set));
+  c.zonesOut = { ts, zones: set, sig };
+  saveState();
+  await sendPair(c, { t: 'zones', ts, zones: toWire(set), sig });
+}
+const sendZonesToAll = () => Promise.all(myWards().map((c) => sendZones(c)));
+
+// ----- the Zones panel -----
+
+function renderZonesPanel() {
+  if (!state) return;
+  const given = adminsOverMe().flatMap((a) => (a.zones ?? []).map((z) => ({ z, a })));
+  $('#zones-assigned-box').hidden = given.length === 0;
+  $('#zones-assigned').innerHTML = given.map(({ z, a }) => `
+    <li data-focus="${esc(z.id)}" data-admin="${esc(a.id)}"><i class="zone-dot ${z.kind}"></i>
+      <div class="who"><div class="name">${esc(z.name || KINDS[z.kind])}</div><div class="muted small">${esc(zoneInfo(z))} · set by ${esc(label(a))}</div></div>
+      <span class="chip lock">Locked</span></li>`).join('');
+  const zs = myZones();
+  const wards = myWards();
+  $('#zones-none').hidden = zs.length > 0 && wards.length > 0;
+  $('#zones-none').textContent = !wards.length
+    ? 'You are not admin over anyone yet. Ask someone under People to be their admin; zones you set here apply once they approve.'
+    : 'No zones yet.';
+  $('#zone-list').innerHTML = zs.map((z) => {
+    const names = z.scope === 'all' ? 'everyone I am admin over' : (z.who ?? []).map((id) => (state.contacts[id] ? label(state.contacts[id]) : null)).filter(Boolean).join(', ') || 'nobody';
+    return `<li data-focus="${esc(z.id)}"><i class="zone-dot ${z.kind}"></i>
+      <div class="who"><div class="name">${esc(z.name || KINDS[z.kind])}</div><div class="muted small">${esc(zoneInfo(z))} · ${esc(names)}</div></div>
+      <div class="actions"><button class="ghost" data-zone-edit="${esc(z.id)}">Edit</button><button class="ghost danger" data-zone-del="${esc(z.id)}">Delete</button></div></li>`;
+  }).join('');
+  $('#zone-add').disabled = zs.length >= MAX_ZONES;
+  const n = zs.length, g = given.length;
+  $('#zones-summary').textContent = n || g
+    ? [n ? `${n} zone${n > 1 ? 's' : ''} set by you` : '', g ? `${g} set for you by an admin` : ''].filter(Boolean).join(' · ')
+    : 'Keep people out of an area, or in one. For people you are admin over.';
+}
+
+function flyToZone(z) {
+  const dLat = (z.r / 6371000) * (180 / Math.PI) * 1.3;
+  const dLon = dLat / Math.max(0.01, Math.cos((z.lat * Math.PI) / 180));
+  setFollow(dragged(follow));
+  map.fitBounds([[z.lon - dLon, z.lat - dLat], [z.lon + dLon, z.lat + dLat]], { padding: 50, maxZoom: 17, duration: 700 }, APP_MOVE);
+}
+
+// ----- the zone form -----
+
+let draft = null;            // the zone being made or edited: { id|null, kind, name, lat, lon, r, scope, who: [], label }
+let zonePicking = false;
+const CHIPS = [100, 250, 500, 1000, 2500];
+
+function renderDraft() {
+  const src = map?.getSource('zone-draft');
+  if (!src) return;
+  if (!draft || draft.lat == null) { src.setData({ type: 'FeatureCollection', features: [] }); return; }
+  const z = normalizeZone({ id: 'draft', kind: draft.kind, lat: draft.lat, lon: draft.lon, r: Math.max(MIN_R, Number(draft.r) || MIN_R) });
+  src.setData({ type: 'FeatureCollection', features: [
+    ...(z ? zoneFeatures([{ zone: z }]).features : []),
+    { type: 'Feature', geometry: { type: 'Point', coordinates: [draft.lon, draft.lat] }, properties: {} },
+  ] });
+}
+
+function syncZoneForm() {
+  if (!draft) return;
+  document.querySelectorAll('input[name="zone-kind"]').forEach((r) => { r.checked = r.value === draft.kind; });
+  $('#zone-kind-help').textContent = draft.kind === 'no'
+    ? 'Red. A warning shows when someone nears or enters it.'
+    : 'Green. A warning shows when someone leaves it, or is outside every green zone.';
+  $('#zone-name').value = draft.name;
+  $('#zone-radius').value = draft.r;
+  $('#zone-slider').value = Math.min(5000, Math.max(50, draft.r));
+  $('#zone-where').textContent = draft.lat == null ? 'No place chosen yet.' : `${draft.label ? `${draft.label} · ` : ''}${draft.lat.toFixed(5)}, ${draft.lon.toFixed(5)}`;
+  document.querySelectorAll('input[name="zone-scope"]').forEach((r) => { r.checked = r.value === draft.scope; });
+  const wards = myWards();
+  const who = $('#zone-who');
+  who.hidden = draft.scope !== 'some';
+  who.innerHTML = wards.length
+    ? wards.map((c) => `<label><input type="checkbox" value="${esc(c.id)}"${draft.who.includes(c.id) ? ' checked' : ''}><span>${esc(label(c))}</span></label>`).join('')
+    : '<p class="muted small">You are not admin over anyone yet.</p>';
+  $('#zone-chips').innerHTML = CHIPS.map((m) => `<button type="button" class="tinted" data-chip="${m}">${m >= 1000 ? `${m / 1000} km` : `${m} m`}</button>`).join('');
+  renderDraft();
+}
+
+function openZoneForm(zone = null) {
+  draft = zone
+    ? { id: zone.id, kind: zone.kind, name: zone.name, lat: zone.lat, lon: zone.lon, r: zone.r, scope: zone.scope ?? 'all', who: [...(zone.who ?? [])], label: '' }
+    : { id: null, kind: 'no', name: '', lat: null, lon: null, r: 500, scope: 'all', who: [], label: '' };
+  $('#zone-form').hidden = false;
+  $('#zone-add').hidden = true;
+  $('#zone-error').hidden = true;
+  $('#zone-address').value = '';
+  $('#zone-results').hidden = true;
+  syncZoneForm();
+  if (draft.lat != null) flyToZone(draft);
+}
+
+function closeZoneForm() {
+  draft = null;
+  zonePicking = false;
+  document.body.classList.remove('zone-picking');
+  $('#zone-form').hidden = true;
+  $('#zone-add').hidden = false;
+  renderDraft();
+}
+
+function placeZone(lat, lon) {
+  zonePicking = false;
+  document.body.classList.remove('zone-picking');
+  if (!draft) return;
+  Object.assign(draft, { lat, lon, label: '' });
+  openPanel('zones');
+  syncZoneForm();
+}
+
+function setDraftRadius(r) {
+  if (!draft) return;
+  draft.r = Math.min(MAX_R, Math.max(MIN_R, Math.round(Number(r) || MIN_R)));
+  $('#zone-radius').value = draft.r;
+  $('#zone-slider').value = Math.min(5000, Math.max(50, draft.r));
+  renderDraft();
+}
+
+async function findAddress() {
+  const text = $('#zone-address').value;
+  const list = $('#zone-results');
+  list.hidden = false;
+  list.innerHTML = '<li class="none">Searching…</li>';
+  try {
+    const places = await findPlaces(text);
+    list.innerHTML = places.length
+      ? places.map((p, i) => `<li><button type="button" data-place="${i}">${esc(p.label)}</button></li>`).join('')
+      : '<li class="none">No match. Try street, number and town.</li>';
+    list.places = places;
+  } catch (err) {
+    list.innerHTML = '<li class="none">The address search cannot be reached. Pick on the map instead.</li>';
+    log.app('warn', `address search: ${err.message}`);
+  }
+}
+
+function saveZone() {
+  const err = (t) => { $('#zone-error').textContent = t; $('#zone-error').hidden = false; };
+  if (!draft) return;
+  draft.name = $('#zone-name').value.trim();
+  if (draft.lat == null) return err('Choose a place: tap the map, use your position, or find an address.');
+  if (!(draft.r >= MIN_R && draft.r <= MAX_R)) return err(`The perimeter must be between ${MIN_R} m and ${MAX_R / 1000} km.`);
+  if (draft.scope === 'some' && draft.who.length === 0) return err('Choose who it is for, or pick everyone.');
+  const zones = myZones();
+  const id = draft.id ?? newZoneId(zones.map((z) => z.id));
+  const zone = { id, kind: draft.kind, name: draft.name || `${KINDS[draft.kind]} ${zones.length + 1}`, lat: draft.lat, lon: draft.lon, r: draft.r, scope: draft.scope, who: draft.scope === 'some' ? draft.who : [] };
+  if (!normalizeZone(zone)) return err('That zone is not valid.');
+  const i = zones.findIndex((z) => z.id === id);
+  if (i >= 0) zones[i] = zone; else zones.push(zone);
+  saveState();
+  closeZoneForm();
+  renderZonesPanel();
+  renderZones();
+  sendZonesToAll();
+}
+
 // ---------- distances ----------// ---------- distances ----------
 // The measure-tape button toggles a live view of the direct distance from me to each person
 // on the map: a dashed line in their colour with the distance at its middle. Off by default,
@@ -884,6 +1118,7 @@ function onFix(p) {
   maybeSendPosition();
   maybeUpdateTerrain();
   updateRoad();
+  renderZones();
   renderContacts();
   renderDistances();
 }
@@ -989,7 +1224,7 @@ async function requestAdmin(c, on) {
   const obj = adminPayload(on, ts);
   const sig = await signObj(keys.ecdsa, obj);
   if (on) Object.assign(c, { adminReq: { ts, sig }, adminRelease: null, adminDeclined: null });
-  else Object.assign(c, { adminReq: null, youAdminThem: false, adminRelease: { ts, sig } });
+  else Object.assign(c, { adminReq: null, youAdminThem: false, adminRelease: { ts, sig }, zonesOut: null });
   saveState();
   await sendPair(c, { ...obj, sig });
 }
@@ -1010,6 +1245,7 @@ async function resendAdmin(c) {
   if (c.adminReq) await sendPair(c, { ...adminPayload(true, c.adminReq.ts), sig: c.adminReq.sig });
   if (c.adminRelease) await sendPair(c, { ...adminPayload(false, c.adminRelease.ts), sig: c.adminRelease.sig });
   if (c.adminAnswer) await sendPair(c, { ...adminAnswerPayload(c.adminAnswer.ok, c.adminAnswer.req), sig: c.adminAnswer.sig });
+  if (c.youAdminThem && c.zonesOut) await sendPair(c, { t: 'zones', ts: c.zonesOut.ts, zones: toWire(c.zonesOut.zones), sig: c.zonesOut.sig });
 }
 
 function maybeSendPosition(force = false) {
@@ -1090,6 +1326,8 @@ async function onPairMessage(id, text, via = 'relay') {
     if (adminVerified && msg.on === true && c.adminAnswer?.req === Number(msg.ts)) await resendAdmin(c);
   } else if (msg.t === 'adminok') {
     adminVerified = await verifyObj(c.s, adminAnswerPayload(msg.ok, Number(msg.req)), msg.sig);
+  } else if (msg.t === 'zones') {
+    adminVerified = await verifyObj(c.s, { t: 'zones', ts: msg.ts, zones: msg.zones }, msg.sig);
   }
   const patch = applyPairMessage(c, msg, { adminVerified });
   if (!Object.keys(patch).length) return;
@@ -1097,6 +1335,8 @@ async function onPairMessage(id, text, via = 'relay') {
   if ('youAdminThem' in patch) showToast(patch.youAdminThem ? `${label(c)} approved: you are now their admin.` : `${label(c)} declined your admin request.`);
   if (msg.t === 'admin' && msg.on !== true && patch.adminOverMe === false) c.adminAnswer = null; // released
   Object.assign(c, patch);
+  if (patch.zones) { renderZonesPanel(); if (patch.zonesTs) showToast(patch.zones.length ? `${label(c)} updated your zones` : `${label(c)} cleared your zones`); }
+  if (patch.youAdminThem) sendZones(c); // newly approved: send the zones that apply to them
   if (patch.pos) { recordTrail(id, { lat: patch.pos.lat, lon: patch.pos.lon, ts: patch.pos.ts }); if (follow.target === id) updateRoad(); }
   if ('theirVisible' in patch && !seeingThem(c)) clearTrail(id); // they stopped sharing: their trail goes too
   saveState();
@@ -1496,6 +1736,8 @@ function renderAll() {
   renderMarkers();
   renderTraces();
   renderFollowUi(); // arrows, my dot and the person label follow the colour settings
+  renderZones();
+  renderZonesPanel();
 }
 
 async function onListClick(e) {
@@ -1628,7 +1870,7 @@ async function renderProfile(coords, totalM) {
 
 // The app opens on the map. The top menu opens one panel at a time over it; the same
 // button (or the close button, or Escape) puts the map back on its own.
-const PANEL_TITLES = { people: 'People', route: 'Route', me: 'Me' };
+const PANEL_TITLES = { people: 'People', route: 'Route', me: 'Me', zones: 'Zones' };
 let openTab = null;
 
 let closeTimer = null;
@@ -1778,6 +2020,7 @@ async function startApp() {
   $('#heightmap').hidden = false;
   $('#offline').hidden = false;
   $('#inspect').hidden = false;
+  setInterval(renderZones, 5000); // positions age: a person who stops reporting stops warning
   setInterval(updateRoad, 4000); // also asks when a position stays put but the wait since the last question is over
   syncOfflineUi();
   startOffline();
@@ -1864,6 +2107,68 @@ function wire() {
   });
   $('#follow-person').addEventListener('click', () => setFollow(pressPersonArrow(follow), { recentre: true }));
   $('#heightmap').addEventListener('click', () => setTerrain3D(!terrainOn()));
+  $('#open-zones').addEventListener('click', () => { renderZonesPanel(); openPanel('zones'); });
+  $('#zones-back').addEventListener('click', () => { closeZoneForm(); openPanel('me'); });
+  $('#zone-add').addEventListener('click', () => openZoneForm());
+  $('#zone-cancel').addEventListener('click', closeZoneForm);
+  $('#zone-form').addEventListener('submit', (e) => { e.preventDefault(); saveZone(); });
+  $('#zone-form').addEventListener('change', (e) => {
+    if (!draft) return;
+    if (e.target.name === 'zone-kind') { draft.kind = e.target.value; syncZoneForm(); }
+    else if (e.target.name === 'zone-scope') { draft.scope = e.target.value; syncZoneForm(); }
+    else if (e.target.closest('#zone-who')) draft.who = [...document.querySelectorAll('#zone-who input:checked')].map((i) => i.value);
+  });
+  $('#zone-name').addEventListener('input', (e) => { if (draft) draft.name = e.target.value; });
+  $('#zone-radius').addEventListener('input', (e) => { if (draft && e.target.value !== '') { draft.r = Number(e.target.value); renderDraft(); $('#zone-slider').value = Math.min(5000, Math.max(50, draft.r)); } });
+  $('#zone-radius').addEventListener('change', (e) => setDraftRadius(e.target.value));
+  $('#zone-slider').addEventListener('input', (e) => setDraftRadius(e.target.value));
+  $('#zone-chips').addEventListener('click', (e) => { const b = e.target.closest('[data-chip]'); if (b) setDraftRadius(b.dataset.chip); });
+  $('#zone-pick').addEventListener('click', () => {
+    if (!draft) return;
+    zonePicking = true;
+    document.body.classList.add('zone-picking');
+    closePanel();
+    showToast('Tap the map to place the zone');
+  });
+  $('#zone-here').addEventListener('click', () => {
+    if (!draft) return;
+    if (!myPos) { $('#zone-error').textContent = 'Waiting for your position…'; $('#zone-error').hidden = false; return; }
+    $('#zone-error').hidden = true;
+    Object.assign(draft, { lat: myPos.lat, lon: myPos.lon, label: 'My position' });
+    syncZoneForm();
+    flyToZone({ ...draft });
+  });
+  $('#zone-find').addEventListener('click', findAddress);
+  $('#zone-address').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); findAddress(); } });
+  $('#zone-results').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-place]');
+    const p = b && $('#zone-results').places?.[Number(b.dataset.place)];
+    if (!p || !draft) return;
+    Object.assign(draft, { lat: p.lat, lon: p.lon, label: p.label });
+    $('#zone-results').hidden = true;
+    syncZoneForm();
+    flyToZone({ ...draft });
+  });
+  $('#zone-list').addEventListener('click', (e) => {
+    const edit = e.target.closest('[data-zone-edit]'), del = e.target.closest('[data-zone-del]');
+    if (edit) return openZoneForm(myZones().find((z) => z.id === edit.dataset.zoneEdit));
+    if (del) {
+      const z = myZones().find((x) => x.id === del.dataset.zoneDel);
+      if (z && confirm(`Delete “${z.name || KINDS[z.kind]}”?`)) {
+        state.zones = myZones().filter((x) => x.id !== z.id);
+        saveState(); renderZonesPanel(); renderZones(); sendZonesToAll();
+      }
+      return;
+    }
+    const li = e.target.closest('[data-focus]');
+    const z = li && myZones().find((x) => x.id === li.dataset.focus);
+    if (z) flyToZone(z);
+  });
+  $('#zones-assigned').addEventListener('click', (e) => {
+    const li = e.target.closest('[data-focus]');
+    const z = li && state.contacts[li.dataset.admin]?.zones?.find((x) => x.id === li.dataset.focus);
+    if (z) flyToZone(z);
+  });
   $('#inspect').addEventListener('click', () => setInspect(!inspectOn));
   $('#offline').addEventListener('click', () => setOfflineMap(!offlineOn()));
   $('#offline-switch').addEventListener('change', (e) => setOfflineMap(e.target.checked));

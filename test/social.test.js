@@ -53,7 +53,7 @@ test('an admin can release me; old releases are ignored', () => {
   const c = { adminOverMe: true, adminTs: now };
   assert.deepEqual(applyPairMessage(c, adminPayload(false, now - 5), { adminVerified: true, now }), {});
   assert.deepEqual(applyPairMessage(c, adminPayload(false, now), { adminVerified: true, now }), {});
-  assert.deepEqual(applyPairMessage(c, adminPayload(false, now + 1), { adminVerified: true, now }), { adminOverMe: false, adminAsk: null, adminTs: now + 1 });
+  assert.deepEqual(applyPairMessage(c, adminPayload(false, now + 1), { adminVerified: true, now }), { adminOverMe: false, adminAsk: null, adminTs: now + 1, zones: [] });
 });
 
 test('my request becomes admin rights only with their signed yes to that very request', () => {
@@ -94,4 +94,21 @@ test('positions go stale after five minutes', () => {
   assert.equal(isStale({ ts: now }, now + STALE_MS - 1), false);
   assert.equal(isStale({ ts: now }, now + STALE_MS + 1), true);
   assert.equal(isStale(null), true);
+});
+
+import { fromWire as _fw, toWire as _tw } from '../public/zones.js';
+test('zones from my admin: only while they are my admin, signed, and newer; released with the rights', () => {
+  const zones = [{ id: 'a', kind: 'no', name: 'X', lat: 60, lon: 10, r: 300 }];
+  const msg = { t: 'zones', ts: 100, zones: _tw(zones) };
+  const admin = { adminOverMe: true };
+  assert.deepEqual(applyPairMessage(admin, msg, { adminVerified: true }), { zones, zonesTs: 100 });
+  assert.deepEqual(applyPairMessage(admin, msg, { adminVerified: false }), {}, 'unsigned');
+  assert.deepEqual(applyPairMessage({ adminOverMe: false }, msg, { adminVerified: true }), {}, 'not my admin');
+  assert.deepEqual(applyPairMessage({ ...admin, zonesTs: 100 }, msg, { adminVerified: true }), {}, 'not newer');
+  assert.deepEqual(applyPairMessage({ ...admin, zonesTs: 99 }, msg, { adminVerified: true }), { zones, zonesTs: 100 });
+  assert.deepEqual(applyPairMessage(admin, { ...msg, zones: [['a']] }, { adminVerified: true }), {}, 'malformed');
+  assert.deepEqual(applyPairMessage(admin, { ...msg, ts: 'x' }, { adminVerified: true }), {});
+  const rel = applyPairMessage({ adminOverMe: true, zones, zonesTs: 100 }, { t: 'admin', on: false, ts: 200 }, { adminVerified: true });
+  assert.equal(rel.adminOverMe, false);
+  assert.deepEqual(rel.zones, []);
 });

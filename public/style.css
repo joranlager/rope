@@ -636,3 +636,48 @@ body.inspecting #map canvas { cursor: crosshair; }
 .road-info .ri-row { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
 .road-info .ri-row span:first-child { color: var(--label-2); }
 .road-info .ri-row b { font-weight: 650; text-align: right; }
+
+/* ---------- Zones ---------- */
+.zone-pill {
+  position: fixed; z-index: 8; left: 0; right: 0; top: 50%; transform: translateY(-50%);
+  padding: 16px max(16px, env(safe-area-inset-right)) 16px max(16px, env(safe-area-inset-left));
+  text-align: center; font-size: 19px; font-weight: 750; line-height: 1.25; color: #fff; pointer-events: none;
+  background: rgba(255, 59, 48, 0.93); box-shadow: 0 4px 24px rgba(0, 0, 0, 0.35);
+  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+}
+.zone-pill[hidden] { display: none; }
+.zone-pill[data-kind="green"] { background: rgba(255, 149, 0, 0.94); }
+.zone-pill[data-level="note"] { background: rgba(255, 149, 0, 0.9); }
+.zone-pill[data-level="danger"] { animation: zonepulse 1.2s ease-in-out infinite; }
+.zone-pill small { display: block; margin-top: 4px; font-size: 14px; font-weight: 600; opacity: 0.92; }
+@keyframes zonepulse { 50% { background: rgba(200, 20, 20, 0.97); } }
+
+.zone-list li { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 0.5px solid var(--separator); }
+.zone-list li:last-child { border-bottom: 0; }
+.zone-dot { flex: none; width: 14px; height: 14px; border-radius: 50%; }
+.zone-dot.no { background: #ff3b30; }
+.zone-dot.green { background: #34c759; }
+.zone-list .who { flex: 1; min-width: 0; }
+.zone-list .name { font-weight: 600; }
+.zone-list .actions { display: flex; gap: 6px; }
+.zone-list button { min-height: 32px; padding: 0 10px; }
+.zone-form h4 { margin: 14px 0 6px; font-size: 14px; color: var(--label-2); text-transform: uppercase; letter-spacing: 0.02em; font-weight: 500; }
+.zone-form input[type="text"], .zone-form input:not([type]), .zone-form input[type="number"] { flex: 1; min-width: 0; }
+.zone-form input[type="range"] { width: 100%; }
+.seg { display: flex; gap: 6px; }
+.seg label { flex: 1; }
+.seg input { position: absolute; opacity: 0; pointer-events: none; }
+.seg span { display: block; text-align: center; padding: 9px 6px; border-radius: 10px; font-weight: 600; background: var(--tint-bg); cursor: pointer; border: 2px solid transparent; }
+.seg input:checked + .seg-no { border-color: #ff3b30; color: #ff3b30; }
+.seg input:checked + .seg-green { border-color: #34c759; color: #1f9d3f; }
+.zone-results { list-style: none; margin: 0 0 8px; padding: 0; border-radius: 10px; overflow: hidden; background: var(--tint-bg); }
+.zone-results button { display: block; width: 100%; text-align: left; padding: 9px 12px; background: transparent; border: 0; border-bottom: 0.5px solid var(--separator); color: var(--label); font: inherit; }
+.zone-results .none { padding: 9px 12px; color: var(--label-2); }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.chips button { min-height: 30px; padding: 0 10px; font-size: 14px; }
+.radio-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
+.zone-who { padding: 4px 0 4px 28px; }
+.zone-who label { display: flex; align-items: center; gap: 10px; padding: 5px 0; }
+.zone-where { margin: 4px 0; }
+.radius-row input { max-width: 110px; }
+body.zone-picking #map canvas { cursor: crosshair; }
