@@ -173,6 +173,40 @@ export async function lookupRoad(lat, lon, radius = RADIUS_M, { info = false, ne
   return null;
 }
 
+// ---------- from what is already saved ----------
+
+/** Metres from a point to a segment, on a flat map around the point (fine at these distances). */
+export function distToSegmentM(lat, lon, a, b) {
+  const k = Math.cos((lat * Math.PI) / 180);
+  const m = 111320;
+  const ax = (a[0] - lon) * k * m, ay = (a[1] - lat) * m;
+  const bx = (b[0] - lon) * k * m, by = (b[1] - lat) * m;
+  const dx = bx - ax, dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, (-ax * dx - ay * dy) / len2));
+  return Math.hypot(ax + t * dx, ay + t * dy);
+}
+
+/**
+ * The road nearest a point among sequences already saved on the device: [{ id, segments }], each as the
+ * service sent it. It works with no network, and for any point on a road that was looked up before, not
+ * only the exact spot. Returns the same shape as lookupRoad, or null. (Height and speed limit are not
+ * kept with the road, so those rows are missing.)
+ */
+export function nearestSaved(sequences, lat, lon, radius = RADIUS_M, { needLabel = false } = {}) {
+  let best = null;
+  for (const seq of sequences) {
+    for (const segment of seq.segments ?? []) {
+      if (needLabel && !roadLabel(segment)) continue;
+      const line = parseWktLine(segment.geometri?.wkt);
+      let d = Infinity;
+      for (let i = 0; i + 1 < line.length; i++) d = Math.min(d, distToSegmentM(lat, lon, line[i], line[i + 1]));
+      if (d <= radius && (!best || d < best.d)) best = { d, segment, siblings: seq.segments };
+    }
+  }
+  return best ? describeSegment(best.segment, { distance: best.d, siblings: best.siblings }) : null;
+}
+
 // ---------- when to ask ----------
 
 /** Is it time to ask again? last = { lat, lon, at, id } of the previous question, or null. */

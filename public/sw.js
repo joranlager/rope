@@ -92,6 +92,9 @@ async function setOffline(value) {
 async function stamped(res) {
   const headers = new Headers(res.headers);
   headers.set(STAMP, String(now()));
+  // The body below is already decoded, so these would now be wrong (and a stale length cuts the answer short).
+  headers.delete('content-encoding');
+  headers.delete('content-length');
   return new Response(await res.arrayBuffer(), { status: res.status, statusText: res.statusText, headers });
 }
 

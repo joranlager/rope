@@ -16,7 +16,7 @@ import { buildDistanceItems, visibleMidpoint, symmetricBounds } from './distance
 import { mountWheelPicker, wheelIsBusy, resetWheelActivity } from './wheel.js';
 import { registerDemProtocol } from './demprotocol.js';
 import * as offline from './offline.js';
-import { lookupRoad, shouldLookup, tapRadiusM } from './road.js';
+import { lookupRoad, nearestSaved, shouldLookup, tapRadiusM } from './road.js';
 import { PROTOCOL as DEM_PROTOCOL, DEM_MIN_ZOOM, DEM_MAX_ZOOM, EXAGGERATION, TILT } from './terrain.js';
 import {
   TRACE_COLORS, traceSettings, addPoint, trimToDistance, toFeature, labelForLength, metersOfLength,
@@ -472,6 +472,35 @@ function roadSubject() {
   return myPos ? { id: 'me', lat: myPos.lat, lon: myPos.lon, acc: myPos.acc } : null;
 }
 
+/** Road sequences saved on this device (the service worker keeps every answer), read back for offline use. */
+const savedRoads = new Map(); // sequence id -> segments
+async function readSavedRoads() {
+  if (typeof caches === 'undefined' || !(await caches.has('rope-road-v1'))) return [];
+  const cache = await caches.open('rope-road-v1');
+  for (const req of await cache.keys()) {
+    const id = /\/veglenkesekvenser\/segmentert\/(\d+)/.exec(req.url)?.[1];
+    if (!id || savedRoads.has(id)) continue;
+    try { savedRoads.set(id, await (await cache.match(req, { ignoreVary: true })).json()); } catch { /* unreadable: skip */ }
+  }
+  return [...savedRoads].map(([id, segments]) => ({ id, segments }));
+}
+
+/**
+ * The road at a position: from the service when there is a network, otherwise (airplane mode, Offline map,
+ * or a service that cannot be reached) from the roads already saved here, which covers any spot on a road
+ * looked at before. Throws if neither can answer.
+ */
+async function findRoad(lat, lon, radius = undefined, opts = {}) {
+  let failure = null;
+  if (offlineOn()) failure = new Error('Offline map is on and this road is not saved');
+  else {
+    try { return await lookupRoad(lat, lon, radius, opts); } catch (err) { failure = err; }
+  }
+  const local = nearestSaved(await readSavedRoads(), lat, lon, radius, opts);
+  if (local) return local;
+  throw failure;
+}
+
 async function updateRoad() {
   if (inspectOn) return; // a tapped road is on show
   const who = roadSubject();
@@ -481,7 +510,7 @@ async function updateRoad() {
   roadBusy = true;
   roadLast = { lat: who.lat, lon: who.lon, at: Date.now(), id: who.id };
   try {
-    const name = (await lookupRoad(who.lat, who.lon, undefined, { needLabel: true }))?.label ?? null;
+    const name = (await findRoad(who.lat, who.lon, undefined, { needLabel: true }))?.label ?? null;
     if (roadSubject()?.id !== who.id) return; // the map moved on to someone else meanwhile
     if (name) { $('#road').textContent = name; $('#road').hidden = false; roadShownFor = who.id; }
     else hideRoad();
@@ -525,7 +554,7 @@ async function inspectAt(lat, lon) {
   $('#road').hidden = false;
   let result;
   try {
-    result = await lookupRoad(lat, lon, radius, { info: true, timeoutMs: 10000 });
+    result = await findRoad(lat, lon, radius, { info: true, timeoutMs: 10000 });
   } catch (err) {
     if (mine !== inspectSeq) return;
     hideRoad();

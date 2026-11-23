@@ -248,3 +248,12 @@ test('in offline mode a saved road answer is used and an unsaved one is a 404', 
   assert.equal((await sw.handle('road', req(NVDB(POS, 'a=2')), ctx)).status, 404);
   assert.equal(net.calls.length, 0);
 });
+
+test('a saved answer does not keep the encoding or length of the answer it came from', async () => {
+  const { sw } = boot();
+  const res = await sw.stamped(new Response('[1]', { status: 200, headers: { 'content-encoding': 'gzip', 'content-length': '999', 'content-type': 'application/json' } }));
+  assert.equal(res.headers.get('content-encoding'), null);
+  assert.equal(res.headers.get('content-length'), null);
+  assert.equal(res.headers.get('content-type'), 'application/json');
+  assert.equal(await res.text(), '[1]');
+});

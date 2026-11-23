@@ -140,9 +140,10 @@ must use the same one.
   (`nvdbapiles.atlas.vegvesen.no`, open, no key; it needs an `X-Client` header, which the app sends). The
   nearest road within 25 m is looked up and named by its street, or by its number (E6, Rv 4, Fv 12) when it
   has no street name. If there is no road that close, the fix is rough (worse than 60 m), or the place is
-  outside Norway, nothing is shown. Good answers are saved on the device (positions are rounded to about
-  11 m so nearby questions share one entry; refreshed after 30 days), so a place already looked up works
-  offline and costs no request. It asks at most every 6 s and only after moving 25 m, and never shows the
+  outside Norway, nothing is shown. Every answer is saved on the device (refreshed after 30 days). With no
+  network (airplane mode, or Offline map on) the app finds the road in the roads it has already saved, so
+  *any* spot on a road you have looked at before works, not only the exact spot; the speed limit and height
+  are missing then. A road you have never looked at online says "No saved road information here". It asks at most every 6 s and only after moving 25 m, and never shows the
   previous person's road.
   - **Ask about a road:** press the **?** button (top of the button stack on the right), then tap a spot on
     the map. If a road is there, its name shows in the same pill and a see-through card lists what NVDB

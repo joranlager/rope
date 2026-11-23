@@ -149,3 +149,24 @@ test('a tap spans more ground when zoomed out', () => {
   assert.equal(tapRadiusM(18, 60), 25);
   assert.ok(tapRadiusM(12, 60) > 100);
 });
+
+import { nearestSaved, distToSegmentM } from '../public/road.js';
+
+test('distance from a point to a line piece', () => {
+  const k = Math.cos((60 * Math.PI) / 180) * 111320;
+  assert.ok(Math.abs(distToSegmentM(60 + 10 / 111320, 10.001, [10, 60], [10.002, 60]) - 10) < 0.2);
+  assert.ok(Math.abs(distToSegmentM(60, 10.002 + 30 / k, [10, 60], [10.002, 60]) - 30) < 0.3);
+});
+
+test('saved roads answer for any spot on them, not only the one looked up before', () => {
+  const road = seg({ geometri: { wkt: 'LINESTRING Z (60.0 10.0 1,60.0 10.01 1)' } });
+  const sequences = [{ id: '1', segments: [road] }, { id: '2', segments: [seg({ adresse: { id: 9, navn: 'Far Road' }, geometri: { wkt: 'LINESTRING (60.1 10.0,60.1 10.01)' } })] }];
+  const k = Math.cos((60 * Math.PI) / 180) * 111320;
+  const a = nearestSaved(sequences, 60 + 5 / 111320, 10.0001);
+  const b = nearestSaved(sequences, 60 + 5 / 111320, 10.0001 + 400 / k); // far along the same road
+  assert.equal(a.title, 'Grensefaret');
+  assert.equal(b.title, 'Grensefaret');
+  assert.equal(nearestSaved(sequences, 60 + 90 / 111320, 10.005), null, 'too far from any saved road');
+  assert.equal(nearestSaved([], 60, 10), null);
+  assert.equal(nearestSaved([{ id: '3', segments: [seg({ adresse: undefined, vegsystemreferanse: {}, geometri: road.geometri })] }], 60, 10.001, 25, { needLabel: true }), null);
+});
