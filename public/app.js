@@ -19,7 +19,7 @@ import * as offline from './offline.js';
 import { lookupRoad, nearestSaved, shouldLookup, tapRadiusM } from './road.js';
 import {
   normalizeZone, toWire, zonesPayload, zonesFor, sameZones, standing, warnings, warningText, zoneFeatures,
-  newZoneId, findPlaces, KINDS, MIN_R, MAX_R, MAX_ZONES,
+  newZoneId, findPlaces, visibilityOf, DEFAULT_VIS, KINDS, MIN_R, MAX_R, MAX_ZONES,
 } from './zones.js';
 import { PROTOCOL as DEM_PROTOCOL, DEM_MIN_ZOOM, DEM_MAX_ZOOM, EXAGGERATION, TILT } from './terrain.js';
 import {
@@ -173,9 +173,9 @@ function initMap() {
     }, 'route-line');
     map.addSource('zones', { type: 'geojson', data: zoneFeatures([]) });
     map.addLayer({ id: 'zones-fill', type: 'fill', source: 'zones',
-      paint: { 'fill-color': ['match', ['get', 'kind'], 'no', '#ff3b30', '#34c759'], 'fill-opacity': ['+', 0.05, ['*', ['get', 's'], 0.38]] } }, 'route-line');
+      paint: { 'fill-color': ['match', ['get', 'kind'], 'no', '#ff3b30', '#34c759'], 'fill-opacity': ['min', 0.65, ['+', ['+', 0.02, ['*', 0.18, ['get', 'v']]], ['*', ['get', 's'], 0.38]]] } }, 'route-line');
     map.addLayer({ id: 'zones-line', type: 'line', source: 'zones',
-      paint: { 'line-color': ['match', ['get', 'kind'], 'no', '#ff3b30', '#34c759'], 'line-width': 1.5, 'line-opacity': ['+', 0.18, ['*', ['get', 's'], 0.6]] } }, 'route-line');
+      paint: { 'line-color': ['match', ['get', 'kind'], 'no', '#ff3b30', '#34c759'], 'line-width': 1.5, 'line-opacity': ['min', 1, ['+', ['+', 0.1, ['*', 0.5, ['get', 'v']]], ['*', ['get', 's'], 0.5]]] } }, 'route-line');
     map.addSource('zone-draft', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
     map.addLayer({ id: 'zone-draft-fill', type: 'fill', source: 'zone-draft', filter: ['==', '$type', 'Polygon'], paint: { 'fill-color': '#007aff', 'fill-opacity': 0.12 } });
     map.addLayer({ id: 'zone-draft-line', type: 'line', source: 'zone-draft', filter: ['==', '$type', 'Polygon'], paint: { 'line-color': '#007aff', 'line-width': 2, 'line-dasharray': [2, 2] } });
@@ -624,7 +624,8 @@ function renderZones() {
   const alerts = [];
   // zones my admins set for me, checked against my position
   const given = adminsOverMe().flatMap((a) => (a.zones ?? []).map((z) => ({ ...z, id: `${a.id}:${z.id}` })));
-  for (const z of given) features.push({ zone: z, strength: myPos ? standing(z, myPos).strength : 0 });
+  const vis = (z) => visibilityOf(state.zoneVis, z.kind);
+  for (const z of given) features.push({ zone: z, strength: myPos ? standing(z, myPos).strength : 0, visibility: vis(z) });
   if (myPos) for (const w of warnings(given, myPos)) alerts.push({ w, who: null });
   // zones I set, checked against where the people they apply to are
   const level = new Map();
@@ -637,7 +638,7 @@ function renderZones() {
   }
   for (const z of myZones()) {
     const n = normalizeZone(z);
-    if (n) features.push({ zone: n, strength: level.get(z.id) ?? 0 });
+    if (n) features.push({ zone: n, strength: level.get(z.id) ?? 0, visibility: vis(n) });
   }
   map.getSource('zones')?.setData(zoneFeatures(features));
   showZoneAlert(alerts);
@@ -677,6 +678,10 @@ const sendZonesToAll = () => Promise.all(myWards().map((c) => sendZones(c)));
 
 function renderZonesPanel() {
   if (!state) return;
+  for (const kind of ['no', 'green']) {
+    const el = $(`#zvis-${kind}`);
+    if (document.activeElement !== el) el.value = String(Math.round(visibilityOf(state.zoneVis, kind) * 100));
+  }
   const given = adminsOverMe().flatMap((a) => (a.zones ?? []).map((z) => ({ z, a })));
   $('#zones-assigned-box').hidden = given.length === 0;
   $('#zones-assigned').innerHTML = given.map(({ z, a }) => `
@@ -2108,6 +2113,13 @@ function wire() {
   $('#follow-person').addEventListener('click', () => setFollow(pressPersonArrow(follow), { recentre: true }));
   $('#heightmap').addEventListener('click', () => setTerrain3D(!terrainOn()));
   $('#open-zones').addEventListener('click', () => { renderZonesPanel(); openPanel('zones'); });
+  for (const kind of ['no', 'green']) {
+    $(`#zvis-${kind}`).addEventListener('input', (e) => {
+      state.zoneVis = { ...(state.zoneVis ?? {}), [kind]: Number(e.target.value) / 100 };
+      saveState();
+      renderZones();
+    });
+  }
   $('#zones-back').addEventListener('click', () => { closeZoneForm(); openPanel('me'); });
   $('#zone-add').addEventListener('click', () => openZoneForm());
   $('#zone-cancel').addEventListener('click', closeZoneForm);

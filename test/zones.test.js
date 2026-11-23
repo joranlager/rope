@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   normalizeZone, toWire, fromWire, zonesPayload, appliesTo, zonesFor, sameZones, standing, warnings, warningText,
-  circleRing, zoneFeatures, parseKartverket, parseNominatim, findPlaces, kartverketUrl, WARN_M, MAX_ZONES,
+  circleRing, zoneFeatures, visibilityOf, DEFAULT_VIS, parseKartverket, parseNominatim, findPlaces, kartverketUrl, WARN_M, MAX_ZONES,
 } from '../public/zones.js';
 
 const Z = (o = {}) => ({ id: 'a', kind: 'no', name: 'Airport', lat: 60, lon: 10, r: 500, ...o });
@@ -133,4 +133,17 @@ test('findPlaces uses Kartverket first, falls back to OSM, and says when the sea
   assert.deepEqual(asked, ['ws.geonorge.no', 'nominatim.openstreetmap.org']);
   assert.deepEqual(await findPlaces('ab', { fetchImpl: mk({}) }), []);
   await assert.rejects(findPlaces('nowhere at all', { fetchImpl: mk({}) }), /500/);
+});
+
+test('visibility is per kind, clamped, and defaults to the middle', () => {
+  assert.equal(DEFAULT_VIS, 0.5);
+  assert.equal(visibilityOf(undefined, 'no'), 0.5);
+  assert.equal(visibilityOf({ no: 0.2 }, 'no'), 0.2);
+  assert.equal(visibilityOf({ no: 0.2 }, 'green'), 0.5);
+  assert.equal(visibilityOf({ no: 5, green: -1 }, 'no'), 1);
+  assert.equal(visibilityOf({ green: -1 }, 'green'), 0);
+  assert.equal(visibilityOf({ no: 'x' }, 'no'), 0.5);
+  const f = zoneFeatures([{ zone: Z(), strength: 0, visibility: 0.8 }, { zone: Z({ id: 'b' }), strength: 0 }]).features;
+  assert.equal(f[0].properties.v, 0.8);
+  assert.equal(f[1].properties.v, 0.5);
 });

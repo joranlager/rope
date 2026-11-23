@@ -681,3 +681,6 @@ body.inspecting #map canvas { cursor: crosshair; }
 .zone-where { margin: 4px 0; }
 .radius-row input { max-width: 110px; }
 body.zone-picking #map canvas { cursor: crosshair; }
+.vis-row { display: flex; align-items: center; gap: 12px; padding: 6px 0; }
+.vis-row > span { flex: none; width: 150px; display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.vis-row input[type="range"] { flex: 1; min-width: 0; }

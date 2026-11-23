@@ -162,7 +162,9 @@ must use the same one.
     the same encrypted channel as everything else; the person's phone accepts them only from someone who is
     their admin right now, only if newer than the set it holds, and keeps them until that admin lets go. The
     person can see them (listed as *Locked*) but cannot change or delete them.
-  - **Seeing them:** every zone is drawn as an almost invisible red or green disc. As a person comes
+  - **Seeing them:** every zone is drawn as a faint red or green disc (a bit stronger than before by default).
+    Anyone, admin or not, can turn the visibility of no fly zones and of green field zones up or down
+    separately with the sliders at the top of the Zones panel. It only changes how they look on that phone. As a person comes
     within 150 m of a no fly zone its red grows stronger, and at the edge and inside it is at full strength. The
     admin sees the same for the people they watch over.
   - **Warning:** a full-width bar in the middle of the screen, on the person's own phone and on the admin's

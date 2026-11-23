@@ -181,6 +181,13 @@
     <section id="tab-zones" class="tabpanel" hidden>
       <button id="zones-back" class="ghost" type="button">‹ Me</button>
 
+      <h3 class="label">How visible zones are on my map</h3>
+      <div class="group pad vis-group">
+        <label class="vis-row"><span><i class="zone-dot no"></i> No fly zones</span><input id="zvis-no" type="range" min="0" max="100" step="5" aria-label="Visibility of no fly zones"></label>
+        <label class="vis-row"><span><i class="zone-dot green"></i> Green field zones</span><input id="zvis-green" type="range" min="0" max="100" step="5" aria-label="Visibility of green field zones"></label>
+        <p class="muted small">Only changes how they look to you, on this phone. A zone still grows stronger as someone nears it, and warnings are not affected.</p>
+      </div>
+
       <div id="zones-assigned-box" hidden>
         <h3 class="label">Set for me by my admin</h3>
         <ul id="zones-assigned" class="group zone-list"></ul>

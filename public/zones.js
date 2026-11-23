@@ -10,6 +10,11 @@ export const WARN_M = 150;       // a zone starts to react this far outside its 
 export const MIN_R = 20;
 export const MAX_R = 50_000;
 export const MAX_ZONES = 40;     // per message: keeps it small enough for the relay
+export const DEFAULT_VIS = 0.5;  // how visible zones are drawn, 0 (barely) .. 1 (clearly), set per kind on each phone
+export const visibilityOf = (settings, kind) => {
+  const v = Number(settings?.[kind]);
+  return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : DEFAULT_VIS;
+};
 export const KINDS = { no: 'No fly zone', green: 'Green field zone' };
 
 const R_EARTH = 6371000;
@@ -152,13 +157,13 @@ export function circleRing(lat, lon, r, steps = 72) {
   return ring;
 }
 
-/** GeoJSON for the map: each zone a polygon with its kind and strength (0..1). */
+/** GeoJSON for the map: each zone a polygon with its kind, strength (0..1, how near someone is) and visibility (0..1, the viewer's setting). */
 export function zoneFeatures(items) {
   return {
     type: 'FeatureCollection',
-    features: items.map(({ zone, strength = 0 }) => ({
+    features: items.map(({ zone, strength = 0, visibility = DEFAULT_VIS }) => ({
       type: 'Feature',
-      properties: { id: zone.id, kind: zone.kind, s: Math.round(strength * 100) / 100 },
+      properties: { id: zone.id, kind: zone.kind, s: Math.round(strength * 100) / 100, v: Math.round(visibility * 100) / 100 },
       geometry: { type: 'Polygon', coordinates: [circleRing(zone.lat, zone.lon, zone.r)] },
     })),
   };
