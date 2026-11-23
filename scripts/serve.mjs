@@ -5,7 +5,8 @@ import path from 'node:path';
 
 const root = path.resolve('public');
 const port = Number(process.env.PORT ?? 8080);
-const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
+const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
+  '.png': 'image/png', '.svg': 'image/svg+xml', '.webmanifest': 'application/manifest+json' };
 
 http.createServer(async (req, res) => {
   const { pathname } = new URL(req.url, 'http://x');

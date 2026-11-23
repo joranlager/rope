@@ -9,7 +9,9 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="Rope">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data: blob: https://tile.openstreetmap.org; connect-src https:; worker-src blob:">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data: blob: https://tile.openstreetmap.org; connect-src https:; worker-src 'self' blob:">
   <title>Rope</title>
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
   <link rel="stylesheet" href="style.css">
@@ -75,6 +77,13 @@
     <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <path d="M2.5 19.5 9 8l4 6.5 2.5-3.5 6 8.5z"/>
       <path d="M6.2 19.5c1.2-2 3-3 5-3M13 19.5c.9-1.4 2.2-2.2 3.7-2.2"/>
+    </svg>
+  </button>
+  <!-- Offline map: only use map parts saved on this device, no network. Off by default. -->
+  <button id="offline" class="fab fab-tool fab-offline" type="button" aria-label="Go offline with the map" aria-pressed="false" hidden>
+    <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M8 18.5h8.8a3.7 3.7 0 0 0 .7-7.3 5.5 5.5 0 0 0-10.4-1.4A4.4 4.4 0 0 0 8 18.5z"/>
+      <path d="M3.5 3.5l17 17"/>
     </svg>
   </button>
   <button id="measure" class="fab fab-tool" type="button" aria-label="Show distances to people" aria-pressed="false" hidden>
@@ -198,6 +207,23 @@
       <div class="group">
         <div class="kv"><span>Terrain (hoydedata)</span><b id="terrain">—</b></div>
         <div class="kv"><span>GPS altitude</span><b id="gps-alt">—</b></div>
+      </div>
+
+      <h3 class="label">Offline map</h3>
+      <div class="group">
+        <label class="switch-row">
+          <span>
+            <strong>Go offline</strong>
+            <small class="muted">Uses only the map, terrain and heights already saved on this device, and makes no map requests. Parts you have not looked at before stay empty. Also on the button above the 3D button.</small>
+          </span>
+          <input id="offline-switch" type="checkbox" role="switch">
+        </label>
+        <div class="kv"><span>Saved on this device</span><b id="offline-count">—</b></div>
+        <div class="kv"><span>App storage used</span><b id="offline-bytes">—</b></div>
+        <div class="row pad-row">
+          <button id="offline-clear" class="tinted" type="button">Forget saved map</button>
+        </div>
+        <p id="offline-note" class="muted small pad-note">Everything you look at is saved automatically while you are online, so look at the area you will need first.</p>
       </div>
 
       <h3 class="label">My security code</h3>
