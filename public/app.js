@@ -5,7 +5,8 @@ import {
 } from './crypto.js';
 import { newCode, parseCode, qrText, pairTopic, PakeHost, PakeJoiner, CODE_TTL_MS } from './pake.js';
 import { Relay, DEFAULT_RELAY } from './net.js';
-import { PeerLink, SIGNAL_MAX_AGE_MS } from './p2p.js';
+import { PeerLink, SIGNAL_MAX_AGE_MS, isOfferer } from './p2p.js';
+import { encodeLink, decodeLink, looksLikeLink } from './qrlink.js';
 import { debugLog, logger, DebugOverlay, tapCounter, ago } from './debug.js';
 import {
   initialFollow, followMe, followPerson, followAll, dragged, pressPersonArrow, contactRemoved,
@@ -1275,12 +1276,17 @@ function onNetworkBack() {
   maybeSendPosition(true);
 }
 
+const pendingLinks = new Map(); // contact id -> a link made while pairing with QR codes, waiting for its contact
+
 function openLink(c) {
   if (links.has(c.id) || !globalThis.RTCPeerConnection) return;
-  const link = new PeerLink({
+  const adopt = pendingLinks.get(c.id); // a direct link already made by the QR pairing
+  pendingLinks.delete(c.id);
+  const opts = {
     myId: state.identity.id,
     theirId: c.id,
-    signal: (obj) => sendPair(c, { ...obj, ts: Date.now() }),
+    // While a QR code is being made, the offer or answer goes into the code instead of over the relay.
+    signal: (obj) => (adopt?.qrCapture ? adopt.qrCapture(obj) : sendPair(c, { ...obj, ts: Date.now() })),
     onMessage: (text) => onPairMessage(c.id, text, 'direct'),
     log: logger(`p2p ${c.name}`),
     onChange: (isOpen) => {
@@ -1289,13 +1295,20 @@ function openLink(c) {
       const ch = channels.get(c.id);
       if (ch) { if (isOpen) relay.pause(ch.topic); else relay.resume(ch.topic); }
       if (!isOpen) linkLostAt.set(c.id, Date.now());
+      if (isOpen && link.qrPaired) {
+        link.qrPaired = false;
+        link.offerer = isOfferer(state.identity.id, c.id); // from now on the usual roles
+        link.attemptMs = 45_000;
+        qrConnected(c);
+      }
       syncContact(c);
       renderContacts();
       renderConn();
     },
-  });
+  };
+  const link = adopt ? Object.assign(adopt, opts) : new PeerLink(opts);
   links.set(c.id, link);
-  link.kick();
+  if (!adopt) link.kick();
 }
 
 function closeLink(id) {
@@ -1479,13 +1492,15 @@ async function joinWithCode(code) {
 // ---------- scanning a code with the camera ----------
 let scan = null; // { stream, timer }
 
-async function startScan() {
+/** Opens the camera and calls onText(text) for each code it reads, until it returns true. */
+async function startScan(onText, prompt = 'Point the camera at the code on the other phone') {
   stopScan();
   if (!navigator.mediaDevices?.getUserMedia) throw new Error('This browser can’t use the camera. Type the number instead.');
   const { default: jsQR } = await import('./vendor/jsqr.js');
   const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
   const video = $('#scan-video');
   video.srcObject = stream;
+  $('#scan-text').textContent = prompt;
   $('#scan').hidden = false;
   await video.play().catch(() => {});
   const canvas = document.createElement('canvas');
@@ -1493,18 +1508,16 @@ async function startScan() {
   scan = { stream };
   scan.timer = setInterval(() => {
     if (!video.videoWidth) return;
-    const k = Math.min(1, 640 / Math.max(video.videoWidth, video.videoHeight));
+    const k = Math.min(1, 1100 / Math.max(video.videoWidth, video.videoHeight)); // big enough for a dense code
     canvas.width = Math.round(video.videoWidth * k);
     canvas.height = Math.round(video.videoHeight * k);
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const found = jsQR(img.data, img.width, img.height, { inversionAttempts: 'attemptBoth' });
-    const code = found && parseCode(found.data);
-    if (!code) return;
+    if (!found || !onText(found.data)) return;
     stopScan();
     if (navigator.vibrate) navigator.vibrate(30);
-    joinWithCode(code).catch((err) => showAddMessage(err.message, true));
-  }, 200);
+  }, 250);
 }
 
 function stopScan() {
@@ -1514,6 +1527,147 @@ function stopScan() {
   $('#scan-video').srcObject = null;
   $('#scan').hidden = true;
   scan = null;
+}
+
+// ---------- connecting with QR codes only ----------
+// No rendezvous server. One phone shows an offer code and the other scans it; the second shows an answer
+// code and the first scans it. See qrlink.js. The cards in the codes are seen by camera, in person, so they
+// are authentic; the direct link opens over the local network.
+
+let qrSession = null; // { role, link, sid, done }
+
+function qrReset() {
+  if (qrSession && !qrSession.done) { qrSession.link?.close(); pendingLinks.delete(qrSession.id); }
+  qrSession = null;
+  stopScan();
+  $('#qr-link').hidden = true;
+  $('#qr-open').hidden = false;
+  $('#qr-choose').hidden = false;
+  $('#qr-step').hidden = true;
+  $('#qr-img').innerHTML = '';
+}
+
+function qrMessage(text, isError = false) {
+  $('#qr-note').textContent = text;
+  $('#qr-note').classList.toggle('error', isError);
+}
+
+async function qrShow(text, title, note, next) {
+  const { default: qrcode } = await import('./vendor/qrcode.js');
+  const qr = qrcode(0, 'L');
+  qr.addData(text, 'Byte');
+  qr.make();
+  $('#qr-img').innerHTML = qr.createSvgTag({ cellSize: 4, margin: 2, scalable: true });
+  $('#qr-img').dataset.size = String(text.length);
+  $('#qr-choose').hidden = true;
+  $('#qr-step').hidden = false;
+  $('#qr-title').textContent = title;
+  qrMessage(note);
+  $('#qr-next').hidden = !next;
+  $('#qr-next').onclick = next ?? null;
+}
+
+/** A direct link that is not yet tied to a contact: its offer or answer goes into a code. */
+function newQrLink(offerer) {
+  if (!globalThis.RTCPeerConnection) throw new Error('This browser cannot make direct connections.');
+  const link = new PeerLink({
+    myId: state.identity.id, theirId: 'qr', signal: (obj) => link.qrCapture?.(obj), onMessage: () => {}, onChange: () => {},
+    offerer, attemptMs: 5 * 60_000, log: logger('p2p qr'),
+  });
+  return link;
+}
+
+/** Adds the contact from a scanned card and gives it the link that was made for it. */
+async function qrAdopt(card, link) {
+  const id = await fingerprint(card.e);
+  if (id === state.identity.id) throw new Error('That is your own code.');
+  const existing = state.contacts[id];
+  if (existing?.status === 'active' && existing.s !== card.s) throw new Error('That is not the same phone as your contact with this name. Nothing was changed.');
+  link.qrPaired = true;
+  link.theirId = id;
+  pendingLinks.set(id, link);
+  if (qrSession) qrSession.id = id;
+  const c = await addPaired(card);
+  if (pendingLinks.has(id)) { closeLink(id); openLink(c); } // already a contact: use this link instead of the old one
+  return c;
+}
+
+function qrConnected(c) {
+  if (qrSession) qrSession.done = true;
+  clearTimeout(qrSession?.slow);
+  qrReset();
+  showAddMessage(`Connected with ${c.name}, directly. No server was used.`);
+  log.pair('info', `connected with ${c.name} by QR codes`);
+  renderAll();
+}
+
+async function qrStartHost() {
+  $('#qr-choose').hidden = true;
+  qrMessage('Preparing your code…');
+  $('#qr-step').hidden = false;
+  const link = newQrLink(true);
+  qrSession = { role: 'host', link, done: false };
+  const offer = new Promise((resolve, reject) => {
+    link.qrCapture = (obj) => { if (obj.k === 'o') resolve(obj); };
+    setTimeout(() => reject(new Error('Could not prepare the code. Is Wi-Fi on?')), 15_000);
+  });
+  link.kick();
+  const o = await offer;
+  link.qrCapture = null;
+  qrSession.sid = o.sid;
+  const text = encodeLink({ kind: 'o', card: cardOf(state.identity), sid: o.sid, d: o.d });
+  await qrShow(text, 'Step 1: let them scan this', 'Hold your phone so they can scan it. When they have, they show you a code.', () => {
+    qrMessage('Scan the code on their phone.');
+    startScan((scanned) => {
+      if (!looksLikeLink(scanned)) return false;
+      let r;
+      try { r = decodeLink(scanned, { expect: 'a' }); } catch (err) { qrMessage(err.message, true); return false; }
+      if (r.sid !== qrSession?.sid) { qrMessage('That answer is for a different code. Start again.', true); return false; }
+      qrFinishHost(r).catch((err) => { qrMessage(err.message, true); });
+      return true;
+    }, 'Scan the answer code on their phone').catch((err) => qrMessage(err.name === 'NotAllowedError' ? 'Camera access was refused.' : err.message, true));
+  });
+}
+
+async function qrFinishHost(r) {
+  const { link } = qrSession;
+  qrMessage('Connecting…');
+  $('#qr-step').hidden = false;
+  const c = await qrAdopt(r.card, link);
+  qrSession.slow = setTimeout(() => qrMessage('Still connecting. Both phones need to be on the same Wi-Fi, or one on the other’s hotspot.'), 20_000);
+  await link.onSignal({ t: 'rtc', k: 'a', sid: r.sid, d: r.d });
+  log.pair('info', `scanned ${c.name}'s answer`);
+}
+
+async function qrStartJoin() {
+  $('#qr-choose').hidden = true;
+  $('#qr-step').hidden = false;
+  qrMessage('Scan the code on their phone.');
+  qrSession = { role: 'join', link: null, done: false };
+  await startScan((scanned) => {
+    if (!looksLikeLink(scanned)) return false;
+    let r;
+    try { r = decodeLink(scanned, { expect: 'o' }); } catch (err) { qrMessage(err.message, true); return false; }
+    qrFinishJoin(r).catch((err) => { qrMessage(err.message, true); log.pair('warn', err.message); });
+    return true;
+  }, 'Scan the first code on their phone');
+}
+
+async function qrFinishJoin(r) {
+  qrMessage('Preparing the answer…');
+  const link = newQrLink(false);
+  qrSession.link = link;
+  const answer = new Promise((resolve, reject) => {
+    link.qrCapture = (obj) => { if (obj.k === 'a') resolve(obj); };
+    setTimeout(() => reject(new Error('Could not prepare the answer. Is Wi-Fi on?')), 15_000);
+  });
+  const c = await qrAdopt(r.card, link);
+  await link.onSignal({ t: 'rtc', k: 'o', sid: r.sid, d: r.d });
+  const a = await answer;
+  link.qrCapture = null;
+  const text = encodeLink({ kind: 'a', card: cardOf(state.identity), sid: a.sid, d: a.d });
+  qrSession.slow = setTimeout(() => qrMessage('Still connecting. Both phones need to be on the same Wi-Fi, or one on the other’s hotspot.'), 60_000);
+  await qrShow(text, `Step 2: let ${c.name} scan this`, `You now have ${c.name} as a contact. Let them scan this code to finish the connection.`);
 }
 
 // ---------- connection status (green: direct, orange: via relay, red: none) ----------
@@ -2076,11 +2230,20 @@ function wire() {
 
   $('#pair-new').addEventListener('click', () => startPairing().catch((err) => { stopPairing(); showAddMessage(err.message, true); }));
   $('#pair-cancel').addEventListener('click', () => stopPairing());
-  $('#pair-scan').addEventListener('click', () => startScan().catch((err) => {
+  $('#pair-scan').addEventListener('click', () => startScan((text) => {
+    const code = parseCode(text);
+    if (!code) return false;
+    joinWithCode(code).catch((err) => showAddMessage(err.message, true));
+    return true;
+  }).catch((err) => {
     stopScan();
     showAddMessage(err.name === 'NotAllowedError' ? 'Camera access was refused. Type the number instead.' : err.message, true);
   }));
   $('#scan-cancel').addEventListener('click', stopScan);
+  $('#qr-open').addEventListener('click', () => { $('#qr-link').hidden = false; $('#qr-open').hidden = true; qrMessage(''); });
+  $('#qr-cancel').addEventListener('click', qrReset);
+  $('#qr-show').addEventListener('click', () => qrStartHost().catch((err) => { qrReset(); showAddMessage(err.message, true); }));
+  $('#qr-scan').addEventListener('click', () => qrStartJoin().catch((err) => { qrReset(); showAddMessage(err.name === 'NotAllowedError' ? 'Camera access was refused.' : err.message, true); }));
 
   $('#gps-retry').addEventListener('click', () => { stopGps(); startGps(); });
 
