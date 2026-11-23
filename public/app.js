@@ -16,7 +16,7 @@ import { buildDistanceItems, visibleMidpoint, symmetricBounds } from './distance
 import { mountWheelPicker, wheelIsBusy, resetWheelActivity } from './wheel.js';
 import { registerDemProtocol } from './demprotocol.js';
 import * as offline from './offline.js';
-import { roadQuery, parseRoad, shouldLookup, describeRoad, tapRadiusM } from './road.js';
+import { fetchRoads, parseRoad, shouldLookup, describeRoad, tapRadiusM } from './road.js';
 import { PROTOCOL as DEM_PROTOCOL, DEM_MIN_ZOOM, DEM_MAX_ZOOM, EXAGGERATION, TILT } from './terrain.js';
 import {
   TRACE_COLORS, traceSettings, addPoint, trimToDistance, toFeature, labelForLength, metersOfLength,
@@ -481,9 +481,7 @@ async function updateRoad() {
   roadBusy = true;
   roadLast = { lat: who.lat, lon: who.lon, at: Date.now(), id: who.id };
   try {
-    const res = await fetch(roadQuery(who.lat, who.lon), { signal: AbortSignal.timeout(9000) });
-    if (!res.ok) throw new Error(String(res.status));
-    const name = parseRoad(await res.json(), who.lat, who.lon);
+    const name = parseRoad(await fetchRoads(who.lat, who.lon), who.lat, who.lon);
     if (roadSubject()?.id !== who.id) return; // the map moved on to someone else meanwhile
     if (name) { $('#road').textContent = name; $('#road').hidden = false; roadShownFor = who.id; }
     else hideRoad();
@@ -528,9 +526,7 @@ async function inspectAt(lat, lon) {
   $('#road').hidden = false;
   let result;
   try {
-    const res = await fetch(roadQuery(lat, lon, Math.round(radius)), { signal: AbortSignal.timeout(10000) });
-    if (!res.ok) throw new Error(`the road service answered ${res.status}`);
-    result = describeRoad(await res.json(), lat, lon, radius);
+    result = describeRoad(await fetchRoads(lat, lon, Math.round(radius), { timeoutMs: 10000 }), lat, lon, radius);
   } catch (err) {
     if (mine !== inspectSeq) return;
     hideRoad();

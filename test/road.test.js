@@ -89,3 +89,26 @@ test('a tap spans more ground when zoomed out', () => {
   assert.equal(tapRadiusM(18, 60), 25);
   assert.ok(tapRadiusM(12, 60) > 100);
 });
+
+import { fetchRoads, OVERPASS_SERVERS } from '../public/road.js';
+
+test('a busy server (502) is skipped: the next one answers, and is tried first next time', async () => {
+  const asked = [];
+  const impl = async (url) => {
+    asked.push(new URL(url).origin);
+    return asked.length === 1 ? new Response('bad', { status: 502 }) : new Response(JSON.stringify({ elements: [] }), { status: 200 });
+  };
+  const json = await fetchRoads(60, 10, 25, { fetchImpl: impl });
+  assert.deepEqual(json, { elements: [] });
+  assert.equal(asked.length, 2);
+  assert.notEqual(asked[0], asked[1]);
+  asked.length = 0;
+  await fetchRoads(60, 10, 25, { fetchImpl: async (u) => { asked.push(new URL(u).origin); return new Response('{"elements":[]}'); } });
+  assert.equal(asked[0], new URL(OVERPASS_SERVERS[1]).origin);
+});
+
+test('when every server fails, the problem is reported; odd answers count as failures', async () => {
+  await assert.rejects(fetchRoads(60, 10, 25, { fetchImpl: async () => new Response('x', { status: 504 }) }), /504/);
+  await assert.rejects(fetchRoads(60, 10, 25, { fetchImpl: async () => { throw new TypeError('offline'); } }), /offline/);
+  await assert.rejects(fetchRoads(60, 10, 25, { fetchImpl: async () => new Response('{"remark":"busy"}') }), /unexpected/);
+});

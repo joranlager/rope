@@ -4,7 +4,14 @@
 // point, with its shape. The nearest one wins. If no road is that close the answer is "unknown"
 // (null) and nothing is shown, rather than a guess at a road across a field.
 
-export const OVERPASS = 'https://overpass-api.de/api/interpreter';
+// Public Overpass servers are often busy (502, 504, 429). They hold the same data, so if one fails the
+// next is tried, and the one that worked is tried first next time.
+export const OVERPASS_SERVERS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+];
+export const OVERPASS = OVERPASS_SERVERS[0];
 export const RADIUS_M = 25;      // a GPS fix is good to about this much on a road
 export const MIN_MOVE_M = 25;    // ask again only after moving this far
 export const MIN_GAP_MS = 6000;  // ... and not more often than this (the service is shared by everyone)
@@ -13,9 +20,32 @@ export const MAX_ACCURACY_M = 60; // a rougher fix could name the wrong road
 // Kinds of way that are roads you can be "on". Not buildings, borders, rivers or railways.
 const ROADS = 'motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|service|pedestrian|track|road|footway|path|cycleway|steps|bridleway|motorway_link|trunk_link|primary_link|secondary_link|tertiary_link';
 
-export function roadQuery(lat, lon, radius = RADIUS_M) {
+export function roadQuery(lat, lon, radius = RADIUS_M, server = OVERPASS) {
   const q = `[out:json][timeout:8];way(around:${radius},${lat.toFixed(6)},${lon.toFixed(6)})[highway~"^(${ROADS})$"];out tags geom;`;
-  return `${OVERPASS}?data=${encodeURIComponent(q)}`;
+  return `${server}?data=${encodeURIComponent(q)}`;
+}
+
+let preferred = 0;
+/**
+ * Asks the Overpass servers in turn until one answers properly. Returns the parsed JSON; throws
+ * (with the last problem) only when every server failed.
+ */
+export async function fetchRoads(lat, lon, radius = RADIUS_M, { fetchImpl = (...a) => fetch(...a), timeoutMs = 9000 } = {}) {
+  let last;
+  for (let n = 0; n < OVERPASS_SERVERS.length; n++) {
+    const i = (preferred + n) % OVERPASS_SERVERS.length;
+    try {
+      const res = await fetchImpl(roadQuery(lat, lon, radius, OVERPASS_SERVERS[i]), { signal: AbortSignal.timeout(timeoutMs) });
+      if (!res.ok) throw new Error(`the road service answered ${res.status}`);
+      const json = await res.json();
+      if (!json || !Array.isArray(json.elements)) throw new Error('the road service sent something unexpected');
+      preferred = i;
+      return json;
+    } catch (err) {
+      last = err;
+    }
+  }
+  throw last;
 }
 
 /** Metres from a point to a segment, on a flat map around the point (fine at these distances). */
