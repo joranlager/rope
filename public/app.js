@@ -16,6 +16,7 @@ import { buildDistanceItems, visibleMidpoint, symmetricBounds } from './distance
 import { mountWheelPicker, wheelIsBusy, resetWheelActivity } from './wheel.js';
 import { registerDemProtocol } from './demprotocol.js';
 import * as offline from './offline.js';
+import { roadQuery, parseRoad, shouldLookup } from './road.js';
 import { PROTOCOL as DEM_PROTOCOL, DEM_MIN_ZOOM, DEM_MAX_ZOOM, EXAGGERATION, TILT } from './terrain.js';
 import {
   TRACE_COLORS, traceSettings, addPoint, trimToDistance, toFeature, labelForLength, metersOfLength,
@@ -421,6 +422,7 @@ async function setOfflineMap(on, { quiet = false } = {}) {
   saveState();
   syncOfflineUi();
   offlineErrors = 0;
+  updateRoad();
   if (!quiet) showToast(on ? 'Offline map: using only what is saved on this device' : 'Back online');
   if (on) offline.keepStorage();
   if (mapReady) { // draw again with the new mode: saved tiles appear, missing ones stop being retried
@@ -439,6 +441,50 @@ async function startOffline() {
   // The worker remembers the mode too, but the page's own setting wins, so both always agree.
   try { if (offlineOn() !== (await offline.getOfflineMode())) await offline.setOfflineMode(offlineOn()); } catch { /* the worker starts on the next load */ }
   syncOfflineUi();
+}
+
+// ---------- road name ----------
+// Under the menu bar: the name of the road I am on, or the one the person I am following is on.
+// Nothing is shown when there is no road close enough, no network, or the position is too rough.
+
+let roadLast = null;
+let roadBusy = false;
+let roadShownFor = null;
+
+function hideRoad() {
+  roadShownFor = null;
+  $('#road').hidden = true;
+}
+
+/** Whose road to name: the person being followed, otherwise me. */
+function roadSubject() {
+  const c = state?.contacts[follow.target];
+  if (c) {
+    const pt = followedPoint();
+    return pt ? { id: c.id, lat: pt.lat, lon: pt.lon, acc: c.pos?.acc ?? null } : null;
+  }
+  return myPos ? { id: 'me', lat: myPos.lat, lon: myPos.lon, acc: myPos.acc } : null;
+}
+
+async function updateRoad() {
+  const who = roadSubject();
+  if (!who || offlineOn() || navigator.onLine === false) return hideRoad();
+  if (roadShownFor !== null && roadShownFor !== who.id) hideRoad(); // never show the previous person's road
+  if (roadBusy || !shouldLookup(roadLast, Date.now(), who, haversineM)) return;
+  roadBusy = true;
+  roadLast = { lat: who.lat, lon: who.lon, at: Date.now(), id: who.id };
+  try {
+    const res = await fetch(roadQuery(who.lat, who.lon), { signal: AbortSignal.timeout(9000) });
+    if (!res.ok) throw new Error(String(res.status));
+    const name = parseRoad(await res.json(), who.lat, who.lon);
+    if (roadSubject()?.id !== who.id) return; // the map moved on to someone else meanwhile
+    if (name) { $('#road').textContent = name; $('#road').hidden = false; roadShownFor = who.id; }
+    else hideRoad();
+  } catch {
+    if (roadShownFor === who.id) hideRoad(); // an old name could be wrong by now
+  } finally {
+    roadBusy = false;
+  }
 }
 
 // ---------- distances ----------// ---------- distances ----------
@@ -643,6 +689,7 @@ function setFollow(next, { recentre = false } = {}) {
   follow = next;
   lastFollowed = null;
   renderFollowUi();
+  updateRoad();
   if (recentre) moveToFollowed({ fresh: true });
 }
 
@@ -734,6 +781,7 @@ function onFix(p) {
   if (state && accuracy <= 100) recordTrail('me', { lat, lon, ts: Date.now() }); // skip very rough fixes
   maybeSendPosition();
   maybeUpdateTerrain();
+  updateRoad();
   renderContacts();
   renderDistances();
 }
@@ -947,7 +995,7 @@ async function onPairMessage(id, text, via = 'relay') {
   if ('youAdminThem' in patch) showToast(patch.youAdminThem ? `${label(c)} approved: you are now their admin.` : `${label(c)} declined your admin request.`);
   if (msg.t === 'admin' && msg.on !== true && patch.adminOverMe === false) c.adminAnswer = null; // released
   Object.assign(c, patch);
-  if (patch.pos) recordTrail(id, { lat: patch.pos.lat, lon: patch.pos.lon, ts: patch.pos.ts });
+  if (patch.pos) { recordTrail(id, { lat: patch.pos.lat, lon: patch.pos.lon, ts: patch.pos.ts }); if (follow.target === id) updateRoad(); }
   if ('theirVisible' in patch && !seeingThem(c)) clearTrail(id); // they stopped sharing: their trail goes too
   saveState();
   renderAll();
@@ -1627,6 +1675,7 @@ async function startApp() {
   $('#measure').hidden = false;
   $('#heightmap').hidden = false;
   $('#offline').hidden = false;
+  setInterval(updateRoad, 4000); // also asks when a position stays put but the wait since the last question is over
   syncOfflineUi();
   startOffline();
   syncTerrainButton();

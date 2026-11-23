@@ -135,6 +135,11 @@ must use the same one.
   - The app's files are fetched fresh when there is a network, so an update arrives at the next visit.
     Add it to the home screen for a full-screen app (a manifest and icon are included). iOS may clear
     saved data for sites not used for a while, so open the map again before a trip.
+- **Road name:** under the menu bar, the name of the road you are on, or of the person you are following
+  (the bottom-right arrow or Show). It comes from OpenStreetMap's road data via the Overpass API: the
+  nearest named road within 25 m (a road's number, such as E6, is used when it has no name). If there is no
+  road that close, the fix is rough (worse than 60 m), there is no network or Offline map is on, nothing is
+  shown. It asks at most every 6 s and only after moving 25 m, and never shows the previous person's road.
 - **Scale:** a small scale line at the bottom left adapts as you zoom in and out.
 - **Colour:** each person, you included, has one colour, used for their map marker, avatar, arrow and trail.
   Pick it from the palette (or leave it on Auto) in their card, or under Me for yourself. It is set
@@ -397,6 +402,7 @@ public/demprotocol.js  makes the terrain tiles on demand for the map library
 public/sw.js       service worker: saves the app and the map parts as they are used (unit tested)
 public/offline.js  page side of offline maps: register, offline mode, what is saved
 public/manifest.webmanifest  + icons/  makes the app installable
+public/road.js     the road name lookup and when to ask (pure, tested)
 public/follow.js   what the map is following: me, a person, or all (pure, tested)
 public/colors.js   one colour per person and a visible glyph colour (pure, tested)
 public/trace.js    trails: trimming, jitter, colours, the wheel model (pure, tested)

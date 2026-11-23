@@ -609,3 +609,13 @@ html[data-boot="reload"] .splash-reload { display: grid; }
 .fab-offline[aria-pressed="true"] { background: var(--blue); color: #fff; border-color: transparent; }
 .pad-row { padding: 8px 16px; }
 .pad-note { padding: 0 16px 12px; margin: 0; }
+
+/* The road being followed, under the menu bar */
+.road {
+  position: fixed; z-index: 5; left: 50%; top: calc(max(10px, env(safe-area-inset-top)) + 48px); transform: translateX(-50%);
+  max-width: calc(100vw - 32px); padding: 4px 12px; border-radius: 999px; font-size: 14px; font-weight: 650;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--label); pointer-events: none;
+  background: var(--bar); box-shadow: var(--shadow-small); text-shadow: 0 0 8px var(--bar-halo), 0 0 1px var(--bar-halo);
+  -webkit-backdrop-filter: saturate(180%) blur(28px); backdrop-filter: saturate(180%) blur(28px);
+}
+.road[hidden] { display: none; }
