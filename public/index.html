@@ -65,7 +65,7 @@
   <div id="scan" class="scan" hidden>
     <video id="scan-video" playsinline muted autoplay></video>
     <div class="scan-frame" aria-hidden="true"></div>
-    <p>Point the camera at the code on the other phone</p>
+    <p id="scan-text">Point the camera at the code on the other phone</p>
     <button id="scan-cancel" class="tinted" type="button">Cancel</button>
   </div>
 
@@ -150,6 +150,21 @@
         <p id="pair-wait" class="muted small">Waiting for them…</p>
       </div>
       <button id="pair-scan" class="tinted wide" type="button">Scan their code</button>
+      <button id="qr-open" class="tinted wide" type="button">Connect with QR codes only (no server)</button>
+      <div id="qr-link" class="pair-show qr-link" hidden>
+        <p id="qr-help" class="muted small">For two phones that are next to each other. Each phone shows a code and the other scans it, twice. No server is used, and because you see each other’s codes in person, nobody can sit in between. Both phones should be on the same Wi-Fi, or one on the other’s hotspot.</p>
+        <div id="qr-choose" class="row">
+          <button id="qr-show" class="primary" type="button">I show my code first</button>
+          <button id="qr-scan" class="tinted" type="button">I scan their code first</button>
+        </div>
+        <div id="qr-step" hidden>
+          <div id="qr-title" class="qr-title"></div>
+          <div id="qr-img" class="qr-img" role="img" aria-label="Connection code as a QR code"></div>
+          <p id="qr-note" class="muted small" role="status"></p>
+          <button id="qr-next" class="primary" type="button" hidden>Next: scan their code</button>
+        </div>
+        <div class="row"><button id="qr-cancel" class="ghost" type="button">Cancel</button></div>
+      </div>
       <form id="add-form" class="row">
         <input id="add-code" placeholder="…or type their number" inputmode="numeric" autocomplete="off" spellcheck="false" aria-label="Pairing code (10 digits)">
         <button type="submit" class="tinted">Pair</button>

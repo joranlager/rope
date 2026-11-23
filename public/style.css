@@ -684,3 +684,10 @@ body.zone-picking #map canvas { cursor: crosshair; }
 .vis-row { display: flex; align-items: center; gap: 12px; padding: 6px 0; }
 .vis-row > span { flex: none; width: 150px; display: flex; align-items: center; gap: 8px; font-weight: 600; }
 .vis-row input[type="range"] { flex: 1; min-width: 0; }
+
+/* Connecting with QR codes only */
+.qr-link .row { justify-content: center; }
+.qr-title { font-weight: 700; margin: 6px 0; }
+.qr-img { width: min(420px, 88vw); margin: 6px auto; background: #fff; border-radius: 10px; padding: 6px; line-height: 0; }
+.qr-img svg { width: 100%; height: auto; display: block; }
+#qr-open { margin-bottom: 8px; }

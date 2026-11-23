@@ -114,12 +114,14 @@ function waitGathering(pc, ms) {
  *  onChange(open)   the link opened or closed
  */
 export class PeerLink {
-  constructor({ myId, theirId, signal, onMessage, onChange, RTC = globalThis.RTCPeerConnection, iceServers = ICE_SERVERS, log = () => {} }) {
-    Object.assign(this, { myId, theirId, signal, onMessage, onChange, RTC, iceServers, log });
+  // offerer: who makes the offers (default: the lower id). attemptMs: how long an attempt may take to open;
+  // a link made by scanning QR codes gives the people time to scan.
+  constructor({ myId, theirId, signal, onMessage, onChange, RTC = globalThis.RTCPeerConnection, iceServers = ICE_SERVERS, log = () => {}, offerer, attemptMs = ATTEMPT_MS }) {
+    Object.assign(this, { myId, theirId, signal, onMessage, onChange, RTC, iceServers, log, attemptMs });
     this.retryAt = 0;
     this.attempts = 0;
     this.lastError = '';
-    this.offerer = isOfferer(myId, theirId);
+    this.offerer = offerer ?? isOfferer(myId, theirId);
     this.pc = null;
     this.dc = null;
     this.sid = null;
@@ -209,7 +211,7 @@ export class PeerLink {
       else if (grace) { clearTimeout(grace); this.timers.delete(grace); grace = null; }
     };
     pc.ondatachannel = (e) => this.#useChannel(pc, e.channel);
-    this.#after(ATTEMPT_MS, () => { if (pc === this.pc && !this.open) this.#fail(pc, `not open after ${ATTEMPT_MS / 1000} s`); });
+    this.#after(this.attemptMs, () => { if (pc === this.pc && !this.open) this.#fail(pc, `not open after ${this.attemptMs / 1000} s`); });
     return pc;
   }
 

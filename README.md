@@ -173,6 +173,15 @@ must use the same one.
     every green zone, or within 150 m of the edge of the one they are in.
   - Zones are circles, one place each (make several zones for several addresses). Distances are straight-line.
     A warning needs a position that is fresh (under 5 minutes old) and, for an admin, a person who sends it.
+- **Connect with QR codes only (no server):** for two phones that are next to each other. **People →
+  Connect with QR codes only (no server)**. One phone chooses *I show my code first*; the other chooses *I scan
+  their code first*, scans it, and shows an answer code, which the first phone then scans. Each phone has now
+  seen the other's identity card by camera, in person, so the keys are authentic (nobody can sit in between),
+  and the direct WebRTC link is already set up, so it opens over the local network (the same Wi-Fi, or one phone
+  on the other's hotspot). No rendezvous server is used at any point. The two codes are about 550 characters
+  each. A code expires after 10 minutes. The contact gets the usual encrypted channel key (derived from the two
+  cards), so later the relay, if there is one, can carry the same conversation; without one, the two phones
+  talk directly whenever they can reach each other, and the QR connection can be repeated to reconnect.
 - **Scale:** a small scale line at the bottom left adapts as you zoom in and out.
 - **Colour:** each person, you included, has one colour, used for their map marker, avatar, arrow and trail.
   Pick it from the palette (or leave it on Auto) in their card, or under Me for yourself. It is set
@@ -423,6 +432,7 @@ public/index.html  the single page (with a Content-Security-Policy meta tag)
 public/app.js      UI, GPS, contacts, handshake, messaging, routing
 public/crypto.js   identity keys, cards, ECDH/HKDF, AES-GCM, signatures
 public/net.js      ntfy publish/subscribe
+public/qrlink.js   the QR codes for connecting without a server: make, read, check (pure, tested)
 public/p2p.js      direct WebRTC link per contact: compact offer/answer codes, hole punching
 public/pake.js     pairing with a number: CPace PAKE over the relay
 public/vendor/     bundled libraries (@noble/curves, jsQR, qrcode-generator), built by npm run vendor
