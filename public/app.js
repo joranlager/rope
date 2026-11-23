@@ -16,7 +16,7 @@ import { buildDistanceItems, visibleMidpoint, symmetricBounds } from './distance
 import { mountWheelPicker, wheelIsBusy, resetWheelActivity } from './wheel.js';
 import { registerDemProtocol } from './demprotocol.js';
 import * as offline from './offline.js';
-import { fetchRoads, parseRoad, shouldLookup, describeRoad, tapRadiusM } from './road.js';
+import { lookupRoad, shouldLookup, tapRadiusM } from './road.js';
 import { PROTOCOL as DEM_PROTOCOL, DEM_MIN_ZOOM, DEM_MAX_ZOOM, EXAGGERATION, TILT } from './terrain.js';
 import {
   TRACE_COLORS, traceSettings, addPoint, trimToDistance, toFeature, labelForLength, metersOfLength,
@@ -168,7 +168,7 @@ function initMap() {
       paint: { 'line-color': ['get', 'color'], 'line-width': 2, 'line-opacity': 0.85, 'line-dasharray': [2, 2] },
     }, 'route-line');
     map.addSource('inspect-road', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
-    map.addLayer({ id: 'inspect-line', type: 'line', source: 'inspect-road', filter: ['==', '$type', 'LineString'],
+    map.addLayer({ id: 'inspect-line', type: 'line', source: 'inspect-road', filter: ['in', '$type', 'LineString'],
       paint: { 'line-color': '#2563eb', 'line-width': 9, 'line-opacity': 0.4 }, layout: { 'line-cap': 'round', 'line-join': 'round' } });
     map.addLayer({ id: 'inspect-point', type: 'circle', source: 'inspect-road', filter: ['==', '$type', 'Point'],
       paint: { 'circle-radius': 6, 'circle-color': '#fff', 'circle-stroke-color': '#2563eb', 'circle-stroke-width': 3 } });
@@ -481,7 +481,7 @@ async function updateRoad() {
   roadBusy = true;
   roadLast = { lat: who.lat, lon: who.lon, at: Date.now(), id: who.id };
   try {
-    const name = parseRoad(await fetchRoads(who.lat, who.lon), who.lat, who.lon);
+    const name = (await lookupRoad(who.lat, who.lon, undefined, { needLabel: true }))?.label ?? null;
     if (roadSubject()?.id !== who.id) return; // the map moved on to someone else meanwhile
     if (name) { $('#road').textContent = name; $('#road').hidden = false; roadShownFor = who.id; }
     else hideRoad();
@@ -525,7 +525,7 @@ async function inspectAt(lat, lon) {
   $('#road').hidden = false;
   let result;
   try {
-    result = describeRoad(await fetchRoads(lat, lon, Math.round(radius), { timeoutMs: 10000 }), lat, lon, radius);
+    result = await lookupRoad(lat, lon, radius, { info: true, timeoutMs: 10000 });
   } catch (err) {
     if (mine !== inspectSeq) return;
     hideRoad();
@@ -555,7 +555,7 @@ async function inspectAt(lat, lon) {
   }
   card.hidden = false;
   map.getSource('inspect-road')?.setData({ type: 'FeatureCollection', features: [
-    { type: 'Feature', geometry: { type: 'LineString', coordinates: result.line }, properties: {} },
+    { type: 'Feature', geometry: { type: 'MultiLineString', coordinates: result.lines }, properties: {} },
     { type: 'Feature', geometry: { type: 'Point', coordinates: [lon, lat] }, properties: {} },
   ] });
 }

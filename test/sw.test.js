@@ -202,43 +202,49 @@ test('install saves the app files and the map library, and survives one failing'
   assert.equal(store.get('rope-lib-v1').size, 2);
 });
 
-const ROAD = (host, data = 'q1') => `https://${host}/api/interpreter?data=${data}`;
-const OK = JSON.stringify({ elements: [{ type: 'way' }] });
+const NVDB = (path, q = 'a=1') => `https://nvdbapiles.atlas.vegvesen.no${path}?${q}`;
+const POS = '/vegnett/api/v4/posisjon';
+const OK = JSON.stringify([{ veglenkesekvens: {} }]);
 
-test('road answers are saved, and any Overpass server shares the same saved answer', async () => {
+test('NVDB road answers are saved and served again, also with no network', async () => {
   const { sw, net, ctx } = boot();
   net.answer = () => new Response(OK, { status: 200 });
-  assert.equal(sw.kindOf(ROAD('overpass-api.de'), 'https://app.test'), 'road');
-  assert.equal(sw.kindOf(ROAD('overpass.kumi.systems'), 'https://app.test'), 'road');
-  await sw.handle('road', req(ROAD('overpass-api.de')), ctx);
+  assert.equal(sw.kindOf(NVDB(POS), 'https://app.test'), 'road');
+  assert.equal(sw.kindOf(NVDB('/vegnett/api/v4/veglenkesekvenser/segmentert/1'), 'https://app.test'), 'road');
+  assert.equal(sw.kindOf(NVDB('/vegobjekter/api/v4/vegobjekter/105'), 'https://app.test'), 'road');
+  assert.equal(sw.kindOf(NVDB('/other'), 'https://app.test'), null);
+  await sw.handle('road', req(NVDB(POS)), ctx);
   await settle(ctx);
   net.calls.length = 0;
   net.online = false;
-  const again = await sw.handle('road', req(ROAD('overpass.private.coffee')), ctx);
-  assert.equal(await again.text(), OK);
+  assert.equal(await (await sw.handle('road', req(NVDB(POS)), ctx)).text(), OK);
   assert.equal(net.calls.length, 0);
 });
 
-test('a road answer that is an error, or a 200 with a remark, is not saved', async () => {
+test('a road answer that is an error, or not the expected JSON, is not saved', async () => {
   const { sw, net, ctx, store } = boot();
-  net.answer = () => new Response(JSON.stringify({ elements: [], remark: 'runtime error: timed out' }), { status: 200 });
-  await sw.handle('road', req(ROAD('overpass-api.de')), ctx);
   net.answer = () => new Response('busy', { status: 502 });
-  await sw.handle('road', req(ROAD('overpass-api.de', 'q2')), ctx);
+  await sw.handle('road', req(NVDB(POS, 'q=1')), ctx);
   net.answer = () => new Response('<html>', { status: 200 });
-  await sw.handle('road', req(ROAD('overpass-api.de', 'q3')), ctx);
+  await sw.handle('road', req(NVDB(POS, 'q=2')), ctx);
+  net.answer = () => new Response('{"timestamp":1,"status":400}', { status: 200 });
+  await sw.handle('road', req(NVDB(POS, 'q=3')), ctx);
   await settle(ctx);
   assert.equal(store.get('rope-road-v1')?.size ?? 0, 0);
+  net.answer = () => new Response('{"objekter":[]}', { status: 200 });
+  await sw.handle('road', req(NVDB('/vegobjekter/api/v4/vegobjekter/105', 'q=4')), ctx);
+  await settle(ctx);
+  assert.equal(store.get('rope-road-v1').size, 1);
 });
 
 test('in offline mode a saved road answer is used and an unsaved one is a 404', async () => {
   const { sw, net, ctx } = boot();
   net.answer = () => new Response(OK, { status: 200 });
-  await sw.handle('road', req(ROAD('overpass-api.de')), ctx);
+  await sw.handle('road', req(NVDB(POS)), ctx);
   await settle(ctx);
   await sw.setOffline(true);
   net.calls.length = 0;
-  assert.equal((await sw.handle('road', req(ROAD('overpass-api.de')), ctx)).status, 200);
-  assert.equal((await sw.handle('road', req(ROAD('overpass-api.de', 'other')), ctx)).status, 404);
+  assert.equal((await sw.handle('road', req(NVDB(POS)), ctx)).status, 200);
+  assert.equal((await sw.handle('road', req(NVDB(POS, 'a=2')), ctx)).status, 404);
   assert.equal(net.calls.length, 0);
 });
