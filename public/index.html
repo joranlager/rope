@@ -59,6 +59,7 @@
     <div id="status" class="status" role="status" aria-live="polite" data-tone="idle" data-conn="idle"><i class="status-dot" aria-hidden="true"></i><span id="status-text" class="status-text">Starting…</span></div>
   </header>
   <div id="road" class="road" role="status" aria-label="Road" hidden></div>
+  <div id="zone-pill" class="zone-pill" role="alert" hidden></div>
   <div id="road-info" class="road-info" aria-live="polite" hidden></div>
   <div id="toast" class="toast" role="status" hidden></div>
   <div id="scan" class="scan" hidden>
@@ -176,6 +177,68 @@
       <p id="route-error" class="error" hidden></p>
     </section>
 
+    <!-- Zones -->
+    <section id="tab-zones" class="tabpanel" hidden>
+      <button id="zones-back" class="ghost" type="button">‹ Me</button>
+
+      <h3 class="label">How visible zones are on my map</h3>
+      <div class="group pad vis-group">
+        <label class="vis-row"><span><i class="zone-dot no"></i> No fly zones</span><input id="zvis-no" type="range" min="0" max="100" step="5" aria-label="Visibility of no fly zones"></label>
+        <label class="vis-row"><span><i class="zone-dot green"></i> Green field zones</span><input id="zvis-green" type="range" min="0" max="100" step="5" aria-label="Visibility of green field zones"></label>
+        <p class="muted small">Only changes how they look to you, on this phone. A zone still grows stronger as someone nears it, and warnings are not affected.</p>
+      </div>
+
+      <div id="zones-assigned-box" hidden>
+        <h3 class="label">Set for me by my admin</h3>
+        <ul id="zones-assigned" class="group zone-list"></ul>
+        <p class="muted small pad-note">These are locked: only the admin who set them can change or remove them.</p>
+      </div>
+
+      <h3 class="label">Zones I set</h3>
+      <p id="zones-none" class="muted small pad-note" hidden></p>
+      <ul id="zone-list" class="group zone-list"></ul>
+      <button id="zone-add" class="primary wide" type="button">Add a zone</button>
+
+      <form id="zone-form" class="group pad zone-form" hidden>
+        <div class="seg" role="radiogroup" aria-label="Kind of zone">
+          <label><input type="radio" name="zone-kind" value="no" checked><span class="seg-no">No fly zone</span></label>
+          <label><input type="radio" name="zone-kind" value="green"><span class="seg-green">Green field zone</span></label>
+        </div>
+        <p id="zone-kind-help" class="muted small"></p>
+        <input id="zone-name" maxlength="60" placeholder="Name (for example School)" aria-label="Zone name" autocomplete="off">
+
+        <h4>Where</h4>
+        <div class="row">
+          <button id="zone-pick" class="tinted" type="button">Pick on the map</button>
+          <button id="zone-here" class="tinted" type="button">My position</button>
+        </div>
+        <div class="row">
+          <input id="zone-address" placeholder="…or an address" aria-label="Address" autocomplete="off" spellcheck="false">
+          <button id="zone-find" class="tinted" type="button">Find</button>
+        </div>
+        <ul id="zone-results" class="zone-results" hidden></ul>
+        <div id="zone-where" class="muted small" role="status"></div>
+
+        <h4>Perimeter</h4>
+        <div class="row radius-row">
+          <input id="zone-radius" type="number" inputmode="numeric" min="20" max="50000" step="10" aria-label="Radius in metres"><span class="muted">m around it</span>
+        </div>
+        <input id="zone-slider" type="range" min="50" max="5000" step="10" aria-label="Radius">
+        <div id="zone-chips" class="chips"></div>
+
+        <h4>For</h4>
+        <label class="radio-row"><input type="radio" name="zone-scope" value="all" checked><span>Everyone I am admin over</span></label>
+        <label class="radio-row"><input type="radio" name="zone-scope" value="some"><span>Only chosen people</span></label>
+        <div id="zone-who" class="zone-who" hidden></div>
+
+        <p id="zone-error" class="error" hidden></p>
+        <div class="row">
+          <button id="zone-save" class="primary" type="submit">Save zone</button>
+          <button id="zone-cancel" class="ghost" type="button">Cancel</button>
+        </div>
+      </form>
+    </section>
+
     <!-- Me -->
     <section id="tab-me" class="tabpanel" hidden>
       <div class="me-head">
@@ -217,6 +280,12 @@
       <div class="group">
         <div class="kv"><span>Terrain (hoydedata)</span><b id="terrain">—</b></div>
         <div class="kv"><span>GPS altitude</span><b id="gps-alt">—</b></div>
+      </div>
+
+      <h3 class="label">Zones</h3>
+      <div class="group pad">
+        <button id="open-zones" class="tinted wide" type="button">No fly and green field zones…</button>
+        <p id="zones-summary" class="muted small"></p>
       </div>
 
       <h3 class="label">Offline map</h3>

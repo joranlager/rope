@@ -151,6 +151,28 @@ must use the same one.
     street is drawn on the map. If not, you are told "No road here". The tap reaches about 16 px around your
     finger, at least 25 m. Press **?** again to leave; the road you are on returns.
   - Road data: © Statens vegvesen (NVDB), licence NLOD.
+- **Zones (no fly and green field):** an admin defines circular zones for the people they hold admin
+  rights over: **Me → No fly and green field zones…**. A **no fly zone** is an area to keep out of (red); a
+  **green field zone** is an area to stay in (green).
+  - **Defining:** tap **Pick on the map**, use **My position**, or type an **address** (Kartverket's address
+    search for Norway, OpenStreetMap's search elsewhere) and give a **perimeter** in metres (type it, slide
+    it, or use a preset). The zone is previewed on the map while you work. A zone is **for everyone I am
+    admin over**, or only for chosen people. Zones you set before someone approves you apply once they do.
+  - **Delivery and locking:** the zones that apply to a person are signed with the admin's key and sent over
+    the same encrypted channel as everything else; the person's phone accepts them only from someone who is
+    their admin right now, only if newer than the set it holds, and keeps them until that admin lets go. The
+    person can see them (listed as *Locked*) but cannot change or delete them.
+  - **Seeing them:** every zone is drawn as a faint red or green disc (a bit stronger than before by default).
+    Anyone, admin or not, can turn the visibility of no fly zones and of green field zones up or down
+    separately with the sliders at the top of the Zones panel. It only changes how they look on that phone. As a person comes
+    within 150 m of a no fly zone its red grows stronger, and at the edge and inside it is at full strength. The
+    admin sees the same for the people they watch over.
+  - **Warning:** a full-width bar in the middle of the screen, on the person's own phone and on the admin's
+    ("Kid is inside the no fly zone “Airfield”"). Inside is a pulsing red; near is red. Several warnings show
+    the worst, with a count. For green zones (when a person has any) the bar is amber when they are outside
+    every green zone, or within 150 m of the edge of the one they are in.
+  - Zones are circles, one place each (make several zones for several addresses). Distances are straight-line.
+    A warning needs a position that is fresh (under 5 minutes old) and, for an admin, a person who sends it.
 - **Scale:** a small scale line at the bottom left adapts as you zoom in and out.
 - **Colour:** each person, you included, has one colour, used for their map marker, avatar, arrow and trail.
   Pick it from the palette (or leave it on Auto) in their card, or under Me for yourself. It is set
@@ -414,6 +436,7 @@ public/sw.js       service worker: saves the app and the map parts as they are u
 public/offline.js  page side of offline maps: register, offline mode, what is saved
 public/manifest.webmanifest  + icons/  makes the app installable
 public/road.js     the road name lookup and when to ask (pure, tested)
+public/zones.js    zones: shapes, signing form, warnings, address search (pure, tested)
 public/follow.js   what the map is following: me, a person, or all (pure, tested)
 public/colors.js   one colour per person and a visible glyph colour (pure, tested)
 public/trace.js    trails: trimming, jitter, colours, the wheel model (pure, tested)

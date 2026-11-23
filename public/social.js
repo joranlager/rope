@@ -8,6 +8,10 @@
 //   adminReq      { ts, sig } my own signed request to become their admin, waiting for their answer
 //   hw            { [type]: ts } newest message seen per type (replay protection, kept across reloads)
 //   pos           { lat, lon, acc, ts } last position received
+//   zones, zonesTs  the zones my admin set for me (kept while they are my admin) and the time of that set
+//   zonesOut      { ts, zones, sig } the set I last sent to them as their admin, kept to re-send
+
+import { fromWire } from './zones.js';
 
 export const STALE_MS = 5 * 60 * 1000;
 export const MAX_SKEW_MS = 10 * 60 * 1000;
@@ -69,13 +73,23 @@ export function applyPairMessage(contact, msg, { now = Date.now(), adminVerified
       if (!Number.isFinite(ts)) return {};
       if (contact.adminTs && ts <= contact.adminTs) return {}; // already answered, stale or replayed
       if (contact.adminAsk && ts <= contact.adminAsk) return {};
-      if (msg.on !== true) return { adminOverMe: false, adminAsk: null, adminTs: ts };
+      if (msg.on !== true) return { adminOverMe: false, adminAsk: null, adminTs: ts, zones: [] }; // their zones go with their rights (zonesTs stays: an old set cannot be replayed later)
       return contact.adminOverMe ? {} : { adminAsk: ts };
     }
     case 'adminok': {
       // Their answer to my request; signed by them over the request's timestamp.
       if (!adminVerified || !contact.adminReq || Number(msg.req) !== contact.adminReq.ts) return {};
       return msg.ok === true ? { youAdminThem: true, adminReq: null } : { youAdminThem: false, adminReq: null, adminDeclined: Number(msg.req) };
+    }
+    case 'zones': {
+      // Zones set by my admin. Only accepted from someone who is my admin right now, with a valid
+      // signature, newer than the set I already hold. There is no age limit: it is re-sent until it arrives.
+      if (!adminVerified || !contact.adminOverMe) return {};
+      const ts = Number(msg.ts);
+      if (!Number.isFinite(ts) || ts <= (contact.zonesTs ?? 0)) return {};
+      const zones = fromWire(msg.zones);
+      if (!zones) return {};
+      return { zones, zonesTs: ts };
     }
     default:
       return {};
